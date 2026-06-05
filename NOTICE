@@ -1,0 +1,11 @@
+github.com/bigbes/gostls
+
+This project is licensed under the BSD 2-Clause License; see LICENSE.
+
+gostls is a pure-Go TLS 1.2 client. It is BSD-2-Clause and links no GPL code.
+Its GOST cryptographic primitives come from github.com/bigbes/gostcrypto (also
+BSD-2-Clause); it additionally depends on filippo.io/bigmod and
+golang.org/x/crypto. None of these is GPL.
+
+gostls is the pure-Go backend for the go-tlsdialer-shaped dialer; the
+alternative cgo OpenSSL backend lives in that separate dialer module, not here.
