@@ -1,0 +1,48 @@
+name: setup-gost-engine
+description: >-
+  Clone, build, and install the GOST reference engine (gost-engine) into
+  OpenSSL's ENGINESDIR so the `gostengine` interop test
+  (TestGOSTEngineInterop) can stand up a real `openssl s_server` speaking GOST
+  TLS suites and have the pure-Go gostls client handshake against it. The verify
+  step fails the job if the engine cipher is unavailable, so a broken engine
+  build surfaces as a red job instead of letting the interop test self-skip.
+
+  Mirrors the action of the same name in gostcrypto-compat, kept self-contained
+  here so gostls's CI carries no cross-repo (or GPL) dependency.
+
+inputs:
+  ref:
+    description: "gost-engine git ref (tag/branch/sha) to build. v3.0.3 matches the engine pinned across the ecosystem."
+    required: false
+    default: v3.0.3
+
+runs:
+  using: composite
+  steps:
+    - name: install build deps
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          cmake build-essential libssl-dev pkg-config
+
+    - name: clone + build + install gost-engine
+      shell: bash
+      run: |
+        git clone --branch "${{ inputs.ref }}" --depth 1 --recurse-submodules \
+          https://github.com/gost-engine/engine.git gost-engine
+        cmake -S gost-engine -B gost-engine/build -DCMAKE_BUILD_TYPE=Release
+        cmake --build gost-engine/build --config Release -j"$(nproc)"
+        # Installs gost.so into OpenSSL's ENGINESDIR so `-engine gost` resolves it.
+        sudo cmake --install gost-engine/build
+
+    - name: verify the engine loads, and export OPENSSL_BIN / GOST_ENGINE_LIB
+      shell: bash
+      run: |
+        openssl version
+        openssl engine -t gost
+        enginesdir="$(openssl version -e | sed -E 's/^ENGINESDIR: "?([^"]*)"?$/\1/')"
+        echo "OPENSSL_BIN=$(command -v openssl)" >> "$GITHUB_ENV"
+        echo "GOST_ENGINE_LIB=${enginesdir}/gost.so" >> "$GITHUB_ENV"
+        # Fail (rather than let the interop test silently skip) if the engine is gone.
+        test -f "${enginesdir}/gost.so"

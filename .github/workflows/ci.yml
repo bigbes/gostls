@@ -55,3 +55,17 @@ jobs:
       # (the seed corpus is already replayed by `go test` in the build job).
       - name: fuzz smoke (each target, short)
         run: make fuzz FUZZTIME=20s FUZZMINTIME=2s
+
+  # Real GOST TLS interop: the pure-Go client handshakes against an OpenSSL
+  # s_server driven by the GOST engine (build-tagged `gostengine`; skips locally
+  # when the engine is absent, but here the engine is built so it must run).
+  gost-interop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: ./.github/actions/setup-gost-engine
+      - name: gost-engine interop (TestGOSTEngineInterop)
+        run: CGO_ENABLED=0 go test -tags gostengine -run TestGOSTEngineInterop -count=1 ./...
