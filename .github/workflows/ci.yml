@@ -9,29 +9,49 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # gostcrypto is wired in by `replace ../gostcrypto`, so it must be
-      # checked out as a sibling directory next to this module.
       - uses: actions/checkout@v4
-        with:
-          path: gostls
-      - uses: actions/checkout@v4
-        with:
-          repository: bigbes/gostcrypto
-          path: gostcrypto
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          # Track the go directive in go.mod (currently 1.25, required by x/crypto).
+          go-version-file: go.mod
 
-      # gostls is pure-Go and BSD-2-Clause. The cgo OpenSSL backend lives in
-      # the separate go-tlsdialer module, not here.
+      # gostls is pure-Go and BSD-2-Clause. gostcrypto is pinned by version in
+      # go.mod (no replace), so it resolves from the module proxy. The cgo
+      # OpenSSL backend lives in the separate go-tlsdialer module, not here.
       - name: build (pure-Go / CGO_ENABLED=0)
-        working-directory: gostls
         run: CGO_ENABLED=0 go build ./...
 
       - name: vet
-        working-directory: gostls
         run: CGO_ENABLED=0 go vet ./...
 
       - name: test
-        working-directory: gostls
         run: CGO_ENABLED=0 go test ./...
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Enforce the zero-issue golangci-lint gate (.golangci.yml, default: all).
+      # Pinned to the same v2 release used in development for reproducibility.
+      - name: golangci-lint
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
+            | sh -s -- -b "$(go env GOPATH)/bin" v2.11.4
+          "$(go env GOPATH)/bin/golangci-lint" run ./...
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Short mutation pass over the attacker-facing wire-parser fuzz targets
+      # (the seed corpus is already replayed by `go test` in the build job).
+      - name: fuzz smoke (each target, short)
+        run: make fuzz FUZZTIME=20s FUZZMINTIME=2s
