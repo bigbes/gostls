@@ -267,6 +267,8 @@ func (c *Conn) doHandshake() error {
 		ServerName:            c.config.ServerName,
 		OfferedSuites:         offeredSuites,
 		RootCAs:               rootCAs,
+		GOSTRoots:             gostCertsParam(c.config.GOSTRoots),
+		GOSTIntermediates:     gostCertsParam(c.config.GOSTIntermediates),
 		InsecureSkipVerify:    c.config.InsecureSkipVerify,
 		VerifyPeerCertificate: c.config.VerifyPeerCertificate,
 		Certificates:          clientCerts,

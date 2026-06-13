@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/bigbes/gostcrypto/x509gost"
+
 	"github.com/bigbes/gostls/internal/handshake"
 )
 
@@ -77,6 +79,19 @@ type Config struct {
 	// RootCAs and RootCAPEMs are mutually exclusive. Setting both is an error.
 	RootCAPEMs [][]byte
 
+	// GOSTRoots is the trust store for GOST-signed server certificates. The
+	// stdlib pools (RootCAs/RootCAPEMs) cannot verify GOST signatures, so a
+	// GOST trust anchor must be supplied here as a parsed x509gost certificate.
+	// If the server presents a GOST-signed certificate and GOSTRoots is empty,
+	// verification fails (unless InsecureSkipVerify). It is not consulted for
+	// non-GOST certificates.
+	GOSTRoots []*x509gost.Certificate
+
+	// GOSTIntermediates optionally bridges a GOST-signed leaf to a root in
+	// GOSTRoots through intermediate CA certificates. Leave nil for a direct
+	// leaf-signed-by-root chain.
+	GOSTIntermediates []*x509gost.Certificate
+
 	// Certificates contains client certificates for mutual TLS (mTLS) client
 	// authentication. When the server sends a CertificateRequest during the
 	// handshake, the first entry in this slice is offered. If the server's
@@ -131,6 +146,18 @@ func (c *Config) rand() io.Reader {
 	}
 
 	return rand.Reader
+}
+
+// gostCertsParam boxes a GOST certificate slice for the any-typed
+// ClientParams.GOSTRoots/GOSTIntermediates fields, mapping a nil slice to a
+// genuine nil interface (rather than a non-nil interface wrapping a nil slice)
+// so the handshake's GOST trust checks behave as documented.
+func gostCertsParam(certs []*x509gost.Certificate) any {
+	if certs == nil {
+		return nil
+	}
+
+	return certs
 }
 
 // rootCAPool returns the certificate pool to use for server verification.

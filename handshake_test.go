@@ -926,9 +926,11 @@ func TestClient_Handshake_GOST(t *testing.T) {
 	//      composes them yet).
 	//   2. GOST CA + server cert fixtures (x509gost/certbuilder_test.go can
 	//      produce these but they are package-internal to x509gost today).
-	//   3. ClientParams.GOSTRoots wired through Config.GOSTRoots.
-	// These depend on Phase-10 live capture to lock in wire formats, so keep
-	// the skip for now.
+	//   3. ClientParams.GOSTRoots wired through Config.GOSTRoots. DONE —
+	//      Config.GOSTRoots/GOSTIntermediates now flow into the handshake
+	//      (see conn.go); only the server driver and fixtures (1, 2) remain.
+	// Items 1 and 2 depend on Phase-10 live capture to lock in wire formats,
+	// so keep the skip for now.
 	t.Skip("deferred: needs scripted GOST server + GOST cert fixtures (Phase 10)")
 }
 
