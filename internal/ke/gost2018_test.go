@@ -1,4 +1,4 @@
-package ke
+package ke //nolint:testpackage // white-box test: accesses unexported rng field and internal types.
 
 // Tests for Gost2018Exchange.
 //
@@ -32,10 +32,10 @@ import (
 // pskeytransport test; declared here separately to keep the test self-contained.
 var fixedSPKIAlgo2018 = []byte{
 	0x30, 0x1f,
-	0x06, 0x08, 0x2a, 0x85, 0x03, 0x07, 0x01, 0x01, 0x01, 0x01, // pubkey OID
+	0x06, 0x08, 0x2a, 0x85, 0x03, 0x07, 0x01, 0x01, 0x01, 0x01, // pubkey OID.
 	0x30, 0x13,
-	0x06, 0x07, 0x2a, 0x85, 0x03, 0x02, 0x02, 0x23, 0x01, // curve OID
-	0x06, 0x08, 0x2a, 0x85, 0x03, 0x07, 0x01, 0x01, 0x02, 0x02, // hash OID
+	0x06, 0x07, 0x2a, 0x85, 0x03, 0x02, 0x02, 0x23, 0x01, // curve OID.
+	0x06, 0x08, 0x2a, 0x85, 0x03, 0x07, 0x01, 0x01, 0x02, 0x02, // hash OID.
 }
 
 // gost2018Unwrap is a test-only server-side key-unwrap helper. It mirrors
@@ -62,11 +62,14 @@ func gost2018Unwrap(
 		EphemKey asn1.RawValue
 		UKM      []byte `asn1:"optional"`
 	}
+
 	var pkt psKeyTransportParse
+
 	rest, err := asn1.Unmarshal(ckeDER, &pkt)
 	if err != nil {
 		return nil, fmt.Errorf("gost2018Unwrap: parse PSKeyTransport_gost: %w", err)
 	}
+
 	if len(rest) != 0 {
 		return nil, fmt.Errorf("gost2018Unwrap: trailing bytes: %d", len(rest))
 	}
@@ -77,16 +80,19 @@ func gost2018Unwrap(
 	// Step 2: extract ephemeral public key from SPKI.
 	// EphemKey is a raw SEQUENCE; we unmarshal it into keSPKI.
 	var spki keSPKI
+
 	rest2, err := asn1.Unmarshal(pkt.EphemKey.FullBytes, &spki)
 	if err != nil {
 		return nil, fmt.Errorf("gost2018Unwrap: parse ephemeral SPKI: %w", err)
 	}
+
 	if len(rest2) != 0 {
 		return nil, fmt.Errorf("gost2018Unwrap: trailing bytes in SPKI: %d", len(rest2))
 	}
 
 	// BIT STRING body is an OCTET STRING wrapping the raw key bytes.
 	var ephemPubRaw []byte
+
 	if _, err = asn1.Unmarshal(spki.SubjectPublicKey.Bytes, &ephemPubRaw); err != nil {
 		return nil, fmt.Errorf("gost2018Unwrap: parse ephemeral pubkey OCTET STRING: %w", err)
 	}
@@ -107,7 +113,9 @@ func gost2018Unwrap(
 		blockSize, ivLen, macLen int
 		newBlock                 func(key []byte) cipher.Block
 	}
+
 	var p kexpP
+
 	switch variant {
 	case Variant2018Kuznyechik:
 		p = kexpP{
@@ -133,10 +141,12 @@ func gost2018Unwrap(
 
 	// CTR decrypt psexp → plaintext (sharedKey || mac).
 	ctrBlock := p.newBlock(cipherKey)
+
 	ctr, err := gost.NewCTR(ctrBlock, ivFull)
 	if err != nil {
 		return nil, fmt.Errorf("gost2018Unwrap: NewCTR: %w", err)
 	}
+
 	plaintext := make([]byte, len(psexp))
 	ctr.XORKeyStream(plaintext, psexp)
 
@@ -144,21 +154,26 @@ func gost2018Unwrap(
 	if keyLen < 0 {
 		return nil, fmt.Errorf("gost2018Unwrap: psexp too short (%d bytes)", len(psexp))
 	}
+
 	recoveredKey := plaintext[:keyLen]
 	gotTag := plaintext[keyLen:]
 
 	// Verify OMAC tag: OMAC(macKey, iv || sharedKey)[:macLen].
 	macBlock := p.newBlock(macKey)
+
 	omac, err := gost.NewOMAC(macBlock, p.macLen)
 	if err != nil {
 		return nil, fmt.Errorf("gost2018Unwrap: NewOMAC: %w", err)
 	}
+
 	if _, err = omac.Write(iv); err != nil {
 		return nil, fmt.Errorf("gost2018Unwrap: OMAC.Write(iv): %w", err)
 	}
+
 	if _, err = omac.Write(recoveredKey); err != nil {
 		return nil, fmt.Errorf("gost2018Unwrap: OMAC.Write(key): %w", err)
 	}
+
 	wantTag := omac.Sum(nil)
 
 	if !bytes.Equal(gotTag, wantTag) {
@@ -180,7 +195,9 @@ func newTestExchangeForVariant(
 	if err != nil {
 		return nil, err
 	}
+
 	ex.rng = bytes.NewReader(rngSeed)
+
 	return ex, nil
 }
 
@@ -195,6 +212,8 @@ func newTestExchangeForVariant(
 // TODO(phase5): cross-validate against a gost-engine oracle once the live
 // integration test in Phase 5 is passing.
 func TestGost2018Exchange_PinnedRand(t *testing.T) {
+	t.Parallel()
+
 	curve := gost.GOST2001CryptoProAParamSetCurve()
 
 	// Fixed server keypair derived from a seeded RNG.
@@ -202,6 +221,7 @@ func TestGost2018Exchange_PinnedRand(t *testing.T) {
 	for i := range serverSeed {
 		serverSeed[i] = byte(i + 0x40)
 	}
+
 	serverPrivRaw, serverPubRaw, err := gost.GenerateEphemeralKey(curve, bytes.NewReader(serverSeed))
 	if err != nil {
 		t.Fatalf("server keygen: %v", err)
@@ -241,6 +261,7 @@ func TestGost2018Exchange_PinnedRand(t *testing.T) {
 	if !bytes.Equal(cke, wantCKE) {
 		t.Errorf("cke mismatch:\n  got:  %x\n  want: %x", cke, wantCKE)
 	}
+
 	if !bytes.Equal(preMaster, wantPreMaster) {
 		t.Errorf("preMaster mismatch:\n  got:  %x\n  want: %x", preMaster, wantPreMaster)
 	}
@@ -249,6 +270,7 @@ func TestGost2018Exchange_PinnedRand(t *testing.T) {
 	if len(cke) == 0 || cke[0] != 0x30 {
 		t.Errorf("cke does not start with SEQUENCE tag 0x30: %02x...", cke[0])
 	}
+
 	// Pre-master must be 32 bytes.
 	if len(preMaster) != 32 {
 		t.Errorf("preMaster length = %d, want 32", len(preMaster))
@@ -259,6 +281,7 @@ func TestGost2018Exchange_PinnedRand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gost2018Unwrap: %v", err)
 	}
+
 	if !bytes.Equal(recovered, preMaster) {
 		t.Errorf("round-trip failed:\n  recovered: %x\n  original:  %x", recovered, preMaster)
 	}
@@ -271,6 +294,8 @@ func TestGost2018Exchange_PinnedRand(t *testing.T) {
 //
 // This test covers both the Kuznyechik and Magma variants.
 func TestGost2018Exchange_KEXSymmetry(t *testing.T) {
+	t.Parallel()
+
 	curve := gost.GOST2001CryptoProAParamSetCurve()
 
 	// Generate a synthetic server keypair (production uses crypto/rand; here
@@ -279,6 +304,7 @@ func TestGost2018Exchange_KEXSymmetry(t *testing.T) {
 	for i := range serverSeed {
 		serverSeed[i] = byte(i + 1)
 	}
+
 	serverPrivRaw, serverPubRaw, err := gost.GenerateEphemeralKey(curve, bytes.NewReader(serverSeed))
 	if err != nil {
 		t.Fatalf("server keygen: %v", err)
@@ -293,21 +319,25 @@ func TestGost2018Exchange_KEXSymmetry(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
 			ex, err := NewGost2018Exchange(curve, fixedSPKIAlgo2018, serverPubRaw, tc.variant, nil)
 			if err != nil {
 				t.Fatalf("NewGost2018Exchange: %v", err)
 			}
+
 			// Use crypto/rand (ex.rng == nil → defaults to rand.Reader).
 
 			cke, preMaster, err := ex.ClientKeyExchange(nil)
 			if err != nil {
 				t.Fatalf("ClientKeyExchange: %v", err)
 			}
+
 			if len(preMaster) != 32 {
 				t.Fatalf("preMaster length = %d, want 32", len(preMaster))
 			}
+
 			if len(cke) == 0 || cke[0] != 0x30 {
 				t.Fatalf("cke does not look like DER SEQUENCE (first byte %02x)", cke[0])
 			}
@@ -316,6 +346,7 @@ func TestGost2018Exchange_KEXSymmetry(t *testing.T) {
 			if err != nil {
 				t.Fatalf("gost2018Unwrap: %v", err)
 			}
+
 			if !bytes.Equal(recovered, preMaster) {
 				t.Errorf("KEX symmetry failed for %s:\n  recovered: %x\n  original:  %x",
 					tc.name, recovered, preMaster)

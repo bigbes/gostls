@@ -31,16 +31,29 @@ type ClientCertificate struct {
 	Certificate *x509.Certificate
 }
 
+// sigHashSHA256RSA is sha256+rsa_pkcs1.
+const (
+	sigHashByte    = uint8(0x04) // sha256 hash.
+	sigHashSHA384  = uint8(0x05) // sha384 hash.
+	sigHashSHA1    = uint8(0x02) // sha1 hash (legacy).
+	sigHashSHA512  = uint8(0x06) // sha512 hash.
+	sigAlgRSA      = uint8(0x01) // rsa_pkcs1.
+	sigAlgECDSA    = uint8(0x03) // ecdsa.
+	curveTypeNamed = uint8(0x03) // RFC 4492: named_curve.
+	hostNameType   = uint8(0x00) // RFC 6066: host_name.
+	tlsVersion12   = uint16(0x0303)
+)
+
 // clientSigAlgsAdvertised is the single source of truth for the
 // SignatureAlgorithms extension sent in ClientHello. selectClientSigAlg iterates
 // this list to find the first entry that the server also supports and is
 // compatible with the client key. sendClientHello references the same slice.
 var clientSigAlgsAdvertised = []SigAndHash{
-	{Hash: 0x04, Sig: 0x01}, // rsa_pkcs1_sha256
-	{Hash: 0x05, Sig: 0x01}, // rsa_pkcs1_sha384
-	{Hash: 0x04, Sig: 0x03}, // ecdsa_secp256r1_sha256
-	{Hash: 0x05, Sig: 0x03}, // ecdsa_secp384r1_sha384
-	{Hash: 0x02, Sig: 0x01}, // rsa_pkcs1_sha1 (legacy fallback)
+	{Hash: sigHashByte, Sig: sigAlgRSA},     // rsa_pkcs1_sha256.
+	{Hash: sigHashSHA384, Sig: sigAlgRSA},   // rsa_pkcs1_sha384.
+	{Hash: sigHashByte, Sig: sigAlgECDSA},   // ecdsa_secp256r1_sha256.
+	{Hash: sigHashSHA384, Sig: sigAlgECDSA}, // ecdsa_secp384r1_sha384.
+	{Hash: sigHashSHA1, Sig: sigAlgRSA},     // rsa_pkcs1_sha1 (legacy fallback).
 }
 
 // availableCipherNames is the set of cipher names negotiable by the default
@@ -60,11 +73,13 @@ var availableCipherNames = map[string]bool{
 func AvailableSuites() []uint16 {
 	all := suites.All()
 	ids := make([]uint16, 0, len(all))
+
 	for _, s := range all {
 		if availableCipherNames[s.Cipher.Name] {
 			ids = append(ids, s.ID)
 		}
 	}
+
 	return ids
 }
 
@@ -94,6 +109,14 @@ type ClientParams struct {
 	// signature does not force every importer of this package to depend on
 	// x509gost; cert_gost.go type-asserts it.
 	GOSTRoots any
+
+	// GOSTIntermediates is an optional pool of GOST-signed intermediate CA
+	// certificates used to bridge a GOST leaf to a root in GOSTRoots, mirroring
+	// x509gost.VerifyOptions.GOSTIntermediates. Leave nil for a direct
+	// leaf-signed-by-root (depth-1) chain. Like GOSTRoots it must be a
+	// []*x509gost.Certificate and is typed as any so the field does not force
+	// importers to depend on x509gost; cert_gost.go type-asserts it.
+	GOSTIntermediates any
 
 	// Certificates contains client certificates for mutual TLS authentication.
 	// When the server sends a CertificateRequest, the first entry is offered.
@@ -186,6 +209,7 @@ func (c *ClientState) Handshake() error {
 	if err != nil {
 		return c.fatal(record.AlertInternalError, fmt.Errorf("tls: master secret: %w", err))
 	}
+
 	c.masterSecret = masterSecret
 
 	// Step 7: key expansion and protector assembly.
@@ -193,6 +217,7 @@ func (c *ClientState) Handshake() error {
 	if err != nil {
 		return err
 	}
+
 	_ = km
 
 	// Step 7.5: if the server sent a CertificateRequest, emit client Certificate
@@ -201,10 +226,12 @@ func (c *ClientState) Handshake() error {
 	// chosen alg for Step 8.5.
 	if c.certReq != nil {
 		alg, _ := c.selectClientSigAlg()
+
 		sent, err := c.sendClientCertificate()
 		if err != nil {
 			return err
 		}
+
 		if sent {
 			c.clientCertSent = true
 			c.clientSigAlg = alg
@@ -214,9 +241,11 @@ func (c *ClientState) Handshake() error {
 	// Step 8: send ClientKeyExchange.
 	cke := &ClientKeyExchange{Body: ckeBody}
 	ckeEnv := MarshalMessage(cke)
+
 	if err := c.layer.WriteRecord(record.ContentTypeHandshake, ckeEnv); err != nil {
 		return c.fatal(record.AlertInternalError, fmt.Errorf("tls: send ClientKeyExchange: %w", err))
 	}
+
 	c.transcript.Write(ckeEnv)
 
 	// Step 8.5: emit CertificateVerify if a non-empty client Certificate was sent.
@@ -231,6 +260,7 @@ func (c *ClientState) Handshake() error {
 	if err := c.layer.WriteRecord(record.ContentTypeChangeCipherSpec, []byte{1}); err != nil {
 		return c.fatal(record.AlertInternalError, fmt.Errorf("tls: send CCS: %w", err))
 	}
+
 	// Install send protector.
 	c.layer.ChangeCipherSpec(sendProt, nil)
 
@@ -239,33 +269,36 @@ func (c *ClientState) Handshake() error {
 	if err != nil {
 		return c.fatal(record.AlertInternalError, fmt.Errorf("tls: transcript sum for client Finished: %w", err))
 	}
+
 	clientVerifyData, err := suites.FinishedVerifyData(c.suite, masterSecret, "client finished", transcriptHash)
 	if err != nil {
 		return c.fatal(record.AlertInternalError, fmt.Errorf("tls: client finished verify_data: %w", err))
 	}
+
 	clientFinished := Finished{VerifyData: clientVerifyData}
 	clientFinishedEnv := MarshalMessage(&clientFinished)
+
 	if err := c.layer.WriteRecord(record.ContentTypeHandshake, clientFinishedEnv); err != nil {
 		return c.fatal(record.AlertInternalError, fmt.Errorf("tls: send client Finished: %w", err))
 	}
+
 	c.transcript.Write(clientFinishedEnv)
 
-	// Step 11: receive server ChangeCipherSpec.
-	for {
-		recvCT, recvPayload, err := c.layer.ReadRecord()
-		if err != nil {
-			return c.fatal(record.AlertHandshakeFailure, fmt.Errorf("tls: read server CCS: %w", err))
-		}
-		if recvCT == record.ContentTypeChangeCipherSpec {
-			if len(recvPayload) != 1 || recvPayload[0] != 1 {
-				return c.fatal(record.AlertUnexpectedMessage, fmt.Errorf("tls: malformed CCS payload"))
-			}
-			break
-		}
-		// Unexpected record type.
-		return c.fatal(record.AlertUnexpectedMessage,
-			fmt.Errorf("tls: expected ChangeCipherSpec, got content type %d", recvCT))
+	// Step 11: receive server ChangeCipherSpec (straight-line: read one record).
+	recvCT, recvPayload, err := c.layer.ReadRecord()
+	if err != nil {
+		return c.fatal(record.AlertHandshakeFailure, fmt.Errorf("tls: read server CCS: %w", err))
 	}
+
+	if recvCT != record.ContentTypeChangeCipherSpec {
+		return c.fatal(record.AlertUnexpectedMessage,
+			fmt.Errorf("%w, got content type %d", errExpectedCCS, recvCT))
+	}
+
+	if len(recvPayload) != 1 || recvPayload[0] != 1 {
+		return c.fatal(record.AlertUnexpectedMessage, errMalformedCCS)
+	}
+
 	// Install recv protector after receiving server CCS.
 	c.layer.ChangeCipherSpec(nil, recvProt)
 
@@ -274,69 +307,84 @@ func (c *ClientState) Handshake() error {
 	if err != nil {
 		return c.fatal(record.AlertHandshakeFailure, fmt.Errorf("tls: read server Finished: %w", err))
 	}
+
 	if serverFinishedType != TypeFinished {
 		return c.fatal(record.AlertUnexpectedMessage,
-			fmt.Errorf("tls: expected Finished, got type %d", serverFinishedType))
+			fmt.Errorf("%w, got type %d", errExpectedFinished, serverFinishedType))
 	}
+
 	serverFinishedMsg, _, err := ParseMessage(buildEnvelope(TypeFinished, serverFinishedPayload))
 	if err != nil {
 		return c.fatal(record.AlertDecryptError, fmt.Errorf("tls: parse server Finished: %w", err))
 	}
-	serverFinished := serverFinishedMsg.(*Finished)
+
+	serverFinished, ok := serverFinishedMsg.(*Finished)
+	if !ok {
+		return c.fatal(record.AlertDecryptError, fmt.Errorf("%w %T", errUnexpectedFinishedType, serverFinishedMsg))
+	}
 
 	// Compute expected server Finished using transcript BEFORE the server Finished message.
 	serverTranscriptHash, err := c.transcript.Sum(c.suite.PRF.Hash)
 	if err != nil {
 		return c.fatal(record.AlertInternalError, fmt.Errorf("tls: transcript sum for server Finished: %w", err))
 	}
-	expectedServerVerifyData, err := suites.FinishedVerifyData(c.suite, masterSecret, "server finished", serverTranscriptHash)
+
+	expectedServerVerifyData, err := suites.FinishedVerifyData(
+		c.suite, masterSecret, "server finished", serverTranscriptHash,
+	)
 	if err != nil {
 		return c.fatal(record.AlertInternalError, fmt.Errorf("tls: server finished verify_data: %w", err))
 	}
 
 	if !suites.EqualVerifyData(serverFinished.VerifyData[:], expectedServerVerifyData) {
-		return c.fatal(record.AlertDecryptError, fmt.Errorf("tls: server Finished verify_data mismatch"))
+		return c.fatal(record.AlertDecryptError, errFinishedMismatch)
 	}
+
 	c.transcript.Write(buildEnvelope(TypeFinished, serverFinishedPayload))
 
 	c.done = true
+
 	return nil
 }
 
 // sendClientHello builds and sends the ClientHello message.
 func (c *ClientState) sendClientHello() error {
 	var random [32]byte
+
 	if _, err := io.ReadFull(c.params.Rand, random[:]); err != nil {
 		return fmt.Errorf("tls: generate client random: %w", err)
 	}
+
 	c.clientRandom = random
 
 	hello := &ClientHello{
-		Version:            0x0303,
+		Version:            tlsVersion12,
 		Random:             random,
 		SessionID:          nil,
 		CipherSuites:       c.params.OfferedSuites,
-		CompressionMethods: []uint8{0},
+		CompressionMethods: []uint8{hostNameType},
 		ServerName:         c.params.ServerName,
 		SupportedGroups: []uint16{
-			0x001D, // X25519
-			0x0017, // secp256r1 (P-256)
-			0x0018, // secp384r1 (P-384)
-			0x0019, // secp521r1 (P-521)
-			0x0100, // ffdhe2048 (RFC 7919)
-			0x0101, // ffdhe3072 (RFC 7919)
+			0x001D, // X25519.
+			0x0017, // secp256r1 (P-256).
+			0x0018, // secp384r1 (P-384).
+			0x0019, // secp521r1 (P-521).
+			0x0100, // ffdhe2048 (RFC 7919).
+			0x0101, // ffdhe3072 (RFC 7919).
 		},
-		ECPointFormats:       []uint8{0x00}, // uncompressed only
+		ECPointFormats:       []uint8{hostNameType}, // uncompressed only.
 		SignatureAlgorithms:  clientSigAlgsAdvertised,
 		ExtendedMasterSecret: false, // deferred: see Phase 10
-		RenegotiationInfo:    true,  // RFC 5746 initial handshake marker
+		RenegotiationInfo:    true,  // RFC 5746 initial handshake marker.
 	}
 
 	env := MarshalMessage(hello)
 	if err := c.layer.WriteRecord(record.ContentTypeHandshake, env); err != nil {
 		return fmt.Errorf("tls: send ClientHello: %w", err)
 	}
+
 	c.transcript.Write(env)
+
 	return nil
 }
 
@@ -346,54 +394,62 @@ func (c *ClientState) recvServerHello() error {
 	if err != nil {
 		return c.fatal(record.AlertHandshakeFailure, fmt.Errorf("tls: read ServerHello: %w", err))
 	}
+
 	if msgType != TypeServerHello {
-		return c.fatal(record.AlertUnexpectedMessage, fmt.Errorf("tls: expected ServerHello, got type %d", msgType))
+		return c.fatal(record.AlertUnexpectedMessage,
+			fmt.Errorf("%w, got type %d", errExpectedServerHello, msgType))
 	}
 
 	msg, _, err := ParseMessage(buildEnvelope(TypeServerHello, payload))
 	if err != nil {
 		return c.fatal(record.AlertHandshakeFailure, fmt.Errorf("tls: parse ServerHello: %w", err))
 	}
-	sh := msg.(*ServerHello)
+
+	sh, ok := msg.(*ServerHello)
+	if !ok {
+		return c.fatal(record.AlertHandshakeFailure,
+			fmt.Errorf("%w %T", errUnexpectedSHType, msg))
+	}
 
 	// Verify version = TLS 1.2.
-	if sh.Version != 0x0303 {
+	if sh.Version != tlsVersion12 {
 		return c.fatal(record.AlertProtocolVersion,
-			fmt.Errorf("tls: server selected version 0x%04x, want 0x0303", sh.Version))
+			fmt.Errorf("%w 0x%04x, want 0x%04x", errBadVersion, sh.Version, tlsVersion12))
 	}
 
 	// Verify the chosen cipher suite was offered.
 	offered := slices.Contains(c.params.OfferedSuites, sh.CipherSuite)
 	if !offered {
 		return c.fatal(record.AlertIllegalParameter,
-			fmt.Errorf("tls: server chose cipher suite 0x%04x which was not offered", sh.CipherSuite))
+			fmt.Errorf("%w 0x%04x", errSuiteNotOffered, sh.CipherSuite))
 	}
 
 	// Look up the suite.
 	suite, ok := suites.Lookup(sh.CipherSuite)
 	if !ok {
 		return c.fatal(record.AlertIllegalParameter,
-			fmt.Errorf("tls: server chose unknown cipher suite 0x%04x", sh.CipherSuite))
+			fmt.Errorf("%w 0x%04x", errUnknownSuite, sh.CipherSuite))
 	}
+
 	c.suite = suite
 
 	// Verify compression = null.
 	if sh.CompressionMethod != 0 {
 		return c.fatal(record.AlertIllegalParameter,
-			fmt.Errorf("tls: server chose non-null compression method %d", sh.CompressionMethod))
+			fmt.Errorf("%w %d", errNonNullCompression, sh.CompressionMethod))
 	}
 
 	// Server extensions must be a subset of what we offered or are expected.
 	// We allow: renegotiation_info (empty, RFC 5746).
 	// We did not offer extended_master_secret, so reject if server sends it.
 	if sh.ExtendedMasterSecret {
-		return c.fatal(record.AlertUnsupportedExtension,
-			fmt.Errorf("tls: server sent extended_master_secret extension but we did not offer it"))
+		return c.fatal(record.AlertUnsupportedExtension, errUnexpectedEMS)
 	}
 
 	c.serverRandom = sh.Random
 
 	c.transcript.Write(buildEnvelope(TypeServerHello, payload))
+
 	return nil
 }
 
@@ -403,20 +459,25 @@ func (c *ClientState) recvCertificate() (*x509.Certificate, *Certificate, error)
 	if err != nil {
 		return nil, nil, c.fatal(record.AlertHandshakeFailure, fmt.Errorf("tls: read Certificate: %w", err))
 	}
+
 	if msgType != TypeCertificate {
 		return nil, nil, c.fatal(record.AlertUnexpectedMessage,
-			fmt.Errorf("tls: expected Certificate, got type %d", msgType))
+			fmt.Errorf("%w, got type %d", errExpectedCertificate, msgType))
 	}
 
 	msg, _, err := ParseMessage(buildEnvelope(TypeCertificate, payload))
 	if err != nil {
 		return nil, nil, c.fatal(record.AlertHandshakeFailure, fmt.Errorf("tls: parse Certificate: %w", err))
 	}
-	certMsg := msg.(*Certificate)
+
+	certMsg, ok := msg.(*Certificate)
+	if !ok {
+		return nil, nil, c.fatal(record.AlertHandshakeFailure,
+			fmt.Errorf("%w %T", errUnexpectedCertType, msg))
+	}
 
 	if len(certMsg.RawCerts) == 0 {
-		return nil, nil, c.fatal(record.AlertBadCertificate,
-			fmt.Errorf("tls: server sent empty certificate list"))
+		return nil, nil, c.fatal(record.AlertBadCertificate, errEmptyCertList)
 	}
 
 	// Parse the leaf certificate and verify the chain. parseAndVerifyLeaf is
@@ -435,6 +496,7 @@ func (c *ClientState) recvCertificate() (*x509.Certificate, *Certificate, error)
 	}
 
 	c.transcript.Write(buildEnvelope(TypeCertificate, payload))
+
 	return leafCert, certMsg, nil
 }
 
@@ -461,20 +523,26 @@ flight:
 		switch ct {
 		case TypeServerKeyExchange:
 			if sawSKE {
-				return nil, c.fatal(record.AlertUnexpectedMessage,
-					fmt.Errorf("tls: duplicate ServerKeyExchange in server flight"))
+				return nil, c.fatal(record.AlertUnexpectedMessage, errDuplicateSKE)
 			}
+
 			if sawCertReq {
-				return nil, c.fatal(record.AlertUnexpectedMessage,
-					fmt.Errorf("tls: ServerKeyExchange received after CertificateRequest (out of order)"))
+				return nil, c.fatal(record.AlertUnexpectedMessage, errSKEAfterCertReq)
 			}
+
 			sawSKE = true
 
 			msg, _, err := ParseMessage(buildEnvelope(TypeServerKeyExchange, payload))
 			if err != nil {
 				return nil, c.fatal(record.AlertHandshakeFailure, fmt.Errorf("tls: parse ServerKeyExchange: %w", err))
 			}
-			ske := msg.(*ServerKeyExchange)
+
+			ske, ok := msg.(*ServerKeyExchange)
+			if !ok {
+				return nil, c.fatal(record.AlertHandshakeFailure,
+					fmt.Errorf("%w %T", errUnexpectedSKEType, msg))
+			}
+
 			c.transcript.Write(buildEnvelope(TypeServerKeyExchange, payload))
 
 			serverKeyExchParams, err = c.verifyServerKeyExchange(ske.Body, serverCert)
@@ -484,31 +552,47 @@ flight:
 
 		case TypeCertificateRequest:
 			if sawCertReq {
-				return nil, c.fatal(record.AlertUnexpectedMessage,
-					fmt.Errorf("tls: duplicate CertificateRequest in server flight"))
+				return nil, c.fatal(record.AlertUnexpectedMessage, errDuplicateCertReq)
 			}
+
 			sawCertReq = true
 
 			msg, _, err := ParseMessage(buildEnvelope(TypeCertificateRequest, payload))
 			if err != nil {
 				return nil, c.fatal(record.AlertHandshakeFailure, fmt.Errorf("tls: parse CertificateRequest: %w", err))
 			}
-			c.certReq = msg.(*CertificateRequest)
+
+			certReq, ok := msg.(*CertificateRequest)
+			if !ok {
+				return nil, c.fatal(record.AlertHandshakeFailure,
+					fmt.Errorf("%w %T", errUnexpectedCertReqType, msg))
+			}
+
+			c.certReq = certReq
 			c.transcript.Write(buildEnvelope(TypeCertificateRequest, payload))
 
 		case TypeServerHelloDone:
-			msg, _, err := ParseMessage(buildEnvelope(TypeServerHelloDone, payload))
+			_, _, err := ParseMessage(buildEnvelope(TypeServerHelloDone, payload))
 			if err != nil {
 				return nil, c.fatal(record.AlertHandshakeFailure, fmt.Errorf("tls: parse ServerHelloDone: %w", err))
 			}
-			_ = msg
+
 			c.transcript.Write(buildEnvelope(TypeServerHelloDone, payload))
+
 			// SHD is the terminal message of the server flight.
 			break flight
 
+		case TypeHelloRequest,
+			TypeClientHello,
+			TypeServerHello,
+			TypeCertificate,
+			TypeCertificateVerify,
+			TypeClientKeyExchange,
+			TypeFinished:
+			fallthrough
 		default:
 			return nil, c.fatal(record.AlertUnexpectedMessage,
-				fmt.Errorf("tls: unexpected message type %d in server flight", ct))
+				fmt.Errorf("%w %d in server flight", errUnexpectedFlightMsg, ct))
 		}
 	}
 
@@ -520,9 +604,9 @@ flight:
 			// key material (RSA transport, or VKO/key-transport per RFC 9189 §4 /
 			// RFC 9367 — GOST 2018 is key-transport, server cert provides the
 			// recipient public key for kexp15 wrapping).
-		default:
+		case suites.KexDHE, suites.KexECDHE:
 			return nil, c.fatal(record.AlertUnexpectedMessage,
-				fmt.Errorf("tls: ServerKeyExchange required for %s but not received", c.suite.Name))
+				fmt.Errorf("%w for %s", errSKERequired, c.suite.Name))
 		}
 	}
 
@@ -539,9 +623,11 @@ func (c *ClientState) verifyServerKeyExchange(body []byte, cert *x509.Certificat
 		return c.verifyECDHEServerKeyExchange(body, cert)
 	case suites.KexDHE:
 		return c.verifyDHEServerKeyExchange(body, cert)
+	case suites.KexRSA, suites.KexGOST2001, suites.KexGOST2012_256, suites.KexGOST2018_256:
+		fallthrough
 	default:
 		return nil, c.fatal(record.AlertHandshakeFailure,
-			fmt.Errorf("tls: unexpected ServerKeyExchange for suite %s (KX=%d)", c.suite.Name, c.suite.KX))
+			fmt.Errorf("%w (suite %s, KX=%d)", errUnexpectedSKE, c.suite.Name, c.suite.KX))
 	}
 }
 
@@ -556,45 +642,57 @@ func (c *ClientState) verifyServerKeyExchange(body []byte, cert *x509.Certificat
 //	uint16 sig_len
 //	signature               (sig_len bytes)
 func (c *ClientState) verifyECDHEServerKeyExchange(body []byte, cert *x509.Certificate) ([]byte, error) {
-	if len(body) < 4 {
+	const minECDHEBodyLen = 4
+
+	if len(body) < minECDHEBodyLen {
 		return nil, c.fatal(record.AlertHandshakeFailure,
-			fmt.Errorf("tls: ECDHE ServerKeyExchange too short: %d bytes", len(body)))
+			fmt.Errorf("%w: %d bytes", errECDHESKETooShort, len(body)))
 	}
 
 	curveType := body[0]
-	if curveType != 3 {
+	if curveType != curveTypeNamed {
 		return nil, c.fatal(record.AlertHandshakeFailure,
-			fmt.Errorf("tls: ECDHE ServerKeyExchange: unsupported curve_type %d", curveType))
+			fmt.Errorf("%w %d", errECDHEUnsupportedCT, curveType))
 	}
 
 	namedCurve := binary.BigEndian.Uint16(body[1:3])
 	pointLen := int(body[3])
-	if len(body) < 4+pointLen+2 {
-		return nil, c.fatal(record.AlertHandshakeFailure,
-			fmt.Errorf("tls: ECDHE ServerKeyExchange: body truncated after point"))
+
+	// sig section must have at least hashAlg + sigAlg.
+	const sigSectionMin = 2
+
+	if len(body) < minECDHEBodyLen+pointLen+sigSectionMin {
+		return nil, c.fatal(record.AlertHandshakeFailure, errECDHEBodyTruncated)
 	}
-	// server params = curve_type || named_curve || point_len || point (for the key exchange)
-	serverParams := body[:4+pointLen]
+
+	// server params = curve_type || named_curve || point_len || point (for the key exchange).
+	serverParams := body[:minECDHEBodyLen+pointLen]
 
 	// Parse signature.
-	sigData := body[4+pointLen:]
-	if len(sigData) < 4 {
-		return nil, c.fatal(record.AlertHandshakeFailure,
-			fmt.Errorf("tls: ECDHE ServerKeyExchange: signature section too short"))
+	sigData := body[minECDHEBodyLen+pointLen:]
+
+	const sigDataMin = 4
+
+	if len(sigData) < sigDataMin {
+		return nil, c.fatal(record.AlertHandshakeFailure, errECDHESigSectionShort)
 	}
+
 	hashAlg := sigData[0]
 	sigAlg := sigData[1]
 	sigLen := int(binary.BigEndian.Uint16(sigData[2:4]))
-	if len(sigData) < 4+sigLen {
-		return nil, c.fatal(record.AlertHandshakeFailure,
-			fmt.Errorf("tls: ECDHE ServerKeyExchange: signature truncated"))
+
+	if len(sigData) < sigDataMin+sigLen {
+		return nil, c.fatal(record.AlertHandshakeFailure, errECDHESigTruncated)
 	}
-	sig := sigData[4 : 4+sigLen]
+
+	sig := sigData[sigDataMin : sigDataMin+sigLen]
 
 	// Build signed data: clientRandom || serverRandom || curve_type || named_curve || point_len || point
 	// (RFC 4492 §5.4: the signature covers client_random + server_random + ServerECDHParams)
 	// ServerECDHParams is the entire params section: curve_type || named_curve || public.
-	signed := make([]byte, 32+32+len(serverParams))
+	const twoRandoms = 32 + 32
+
+	signed := make([]byte, twoRandoms+len(serverParams))
 	copy(signed[:32], c.clientRandom[:])
 	copy(signed[32:64], c.serverRandom[:])
 	copy(signed[64:], serverParams)
@@ -605,8 +703,9 @@ func (c *ClientState) verifyECDHEServerKeyExchange(body []byte, cert *x509.Certi
 	}
 
 	// named_curve is not in the 4-byte point header; for ke.ECDHEExchange we need:
-	// curve_type (1) || named_curve (2) || point_len (1) || point (point_len)
+	// curve_type (1) || named_curve (2) || point_len (1) || point (point_len).
 	_ = namedCurve
+
 	return serverParams, nil
 }
 
@@ -621,17 +720,20 @@ func (c *ClientState) verifyECDHEServerKeyExchange(body []byte, cert *x509.Certi
 //	signature                  (sig_len bytes)
 func (c *ClientState) verifyDHEServerKeyExchange(body []byte, cert *x509.Certificate) ([]byte, error) {
 	// Parse dh_p, dh_g, dh_Ys (2-byte length-prefixed each).
-	pBytes, rest, err := readU16LenPrefixedBuf(body)
+	// Content is not needed; only rest (for serverParams boundary) is used.
+	rest, err := readU16LenPrefixedBuf(body)
 	if err != nil {
 		return nil, c.fatal(record.AlertHandshakeFailure,
 			fmt.Errorf("tls: DHE ServerKeyExchange: parse dh_p: %w", err))
 	}
-	gBytes, rest, err := readU16LenPrefixedBuf(rest)
+
+	rest, err = readU16LenPrefixedBuf(rest)
 	if err != nil {
 		return nil, c.fatal(record.AlertHandshakeFailure,
 			fmt.Errorf("tls: DHE ServerKeyExchange: parse dh_g: %w", err))
 	}
-	YsBytes, rest, err := readU16LenPrefixedBuf(rest)
+
+	rest, err = readU16LenPrefixedBuf(rest)
 	if err != nil {
 		return nil, c.fatal(record.AlertHandshakeFailure,
 			fmt.Errorf("tls: DHE ServerKeyExchange: parse dh_Ys: %w", err))
@@ -642,21 +744,26 @@ func (c *ClientState) verifyDHEServerKeyExchange(body []byte, cert *x509.Certifi
 	serverParams := body[:serverParamsLen]
 
 	// Parse signature.
-	if len(rest) < 4 {
-		return nil, c.fatal(record.AlertHandshakeFailure,
-			fmt.Errorf("tls: DHE ServerKeyExchange: signature section too short"))
+	const sigSectionMin = 4
+
+	if len(rest) < sigSectionMin {
+		return nil, c.fatal(record.AlertHandshakeFailure, errDHESigSectionShort)
 	}
+
 	hashAlg := rest[0]
 	sigAlg := rest[1]
 	sigLen := int(binary.BigEndian.Uint16(rest[2:4]))
-	if len(rest) < 4+sigLen {
-		return nil, c.fatal(record.AlertHandshakeFailure,
-			fmt.Errorf("tls: DHE ServerKeyExchange: signature truncated"))
+
+	if len(rest) < sigSectionMin+sigLen {
+		return nil, c.fatal(record.AlertHandshakeFailure, errDHESigTruncated)
 	}
-	sig := rest[4 : 4+sigLen]
+
+	sig := rest[sigSectionMin : sigSectionMin+sigLen]
 
 	// Signed data: clientRandom || serverRandom || ServerDHParams.
-	signed := make([]byte, 32+32+len(serverParams))
+	const twoRandoms = 32 + 32
+
+	signed := make([]byte, twoRandoms+len(serverParams))
 	copy(signed[:32], c.clientRandom[:])
 	copy(signed[32:64], c.serverRandom[:])
 	copy(signed[64:], serverParams)
@@ -666,25 +773,27 @@ func (c *ClientState) verifyDHEServerKeyExchange(body []byte, cert *x509.Certifi
 			fmt.Errorf("tls: DHE ServerKeyExchange signature verification: %w", err))
 	}
 
-	// Re-encode the DHE params for ke.DHEExchange: dh_p || dh_g || dh_Ys (2-byte len-prefixed).
-	// serverParams already has this form directly from the wire.
-	_ = pBytes
-	_ = gBytes
-	_ = YsBytes
 	return serverParams, nil
 }
 
-// readU16LenPrefixedBuf reads a uint16-length-prefixed field from buf.
-func readU16LenPrefixedBuf(buf []byte) (data, rest []byte, err error) {
-	if len(buf) < 2 {
-		return nil, nil, fmt.Errorf("truncated: need 2 bytes for length prefix, have %d", len(buf))
+// readU16LenPrefixedBuf skips a uint16-length-prefixed field from buf,
+// returning only the remaining bytes after the field (the content is discarded).
+func readU16LenPrefixedBuf(buf []byte) (rest []byte, err error) {
+	const prefixLen = 2
+
+	if len(buf) < prefixLen {
+		return nil, fmt.Errorf("%w, have %d", errU16PrefixTruncated, len(buf))
 	}
+
 	n := int(binary.BigEndian.Uint16(buf[:2]))
-	buf = buf[2:]
+
+	buf = buf[prefixLen:]
+
 	if len(buf) < n {
-		return nil, nil, fmt.Errorf("truncated: need %d bytes, have %d", n, len(buf))
+		return nil, fmt.Errorf("%w: need %d bytes, have %d", errU16BodyTruncated, n, len(buf))
 	}
-	return buf[:n], buf[n:], nil
+
+	return buf[n:], nil
 }
 
 // verifySignature verifies a TLS 1.2 digital signature over signed using
@@ -695,32 +804,39 @@ func verifySignature(cert *x509.Certificate, hashAlg, sigAlg uint8, signed, sig 
 	if err != nil {
 		return err
 	}
+
 	h := cryptoHash.New()
 	h.Write(signed)
+
 	digest := h.Sum(nil)
 
 	switch sigAlg {
-	case 0x01: // rsa
+	case sigAlgRSA:
 		rsaPub, ok := cert.PublicKey.(*rsa.PublicKey)
 		if !ok {
-			return fmt.Errorf("cert public key is not RSA (got %T)", cert.PublicKey)
+			return fmt.Errorf("%w (got %T)", errCertNotRSA, cert.PublicKey)
 		}
+
 		return verifyRSASignature(rsaPub, hashAlg, digest, sig)
-	case 0x03: // ecdsa
+	case sigAlgECDSA:
 		ecPub, ok := cert.PublicKey.(*ecdsa.PublicKey)
 		if !ok {
-			return fmt.Errorf("cert public key is not ECDSA (got %T)", cert.PublicKey)
+			return fmt.Errorf("%w (got %T)", errCertNotECDSA, cert.PublicKey)
 		}
+
 		return verifyECDSASignature(ecPub, digest, sig)
 	default:
-		return fmt.Errorf("unsupported signature algorithm 0x%02x", sigAlg)
+		return fmt.Errorf("%w 0x%02x", errUnsupportedSigAlg, sigAlg)
 	}
 }
 
 // computeKeyExchange runs the key exchange for the chosen suite.
 // Returns (preMaster, ckeBody, error).
-func (c *ClientState) computeKeyExchange(cert *x509.Certificate, serverParams []byte, rawCerts [][]byte) ([]byte, []byte, error) {
+func (c *ClientState) computeKeyExchange(
+	cert *x509.Certificate, serverParams []byte, rawCerts [][]byte,
+) ([]byte, []byte, error) {
 	var exchange ke.Exchange
+
 	switch c.suite.KX {
 	case suites.KexECDHE:
 		exchange = ke.NewECDHEExchangeWithRand(c.params.Rand)
@@ -730,25 +846,30 @@ func (c *ClientState) computeKeyExchange(cert *x509.Certificate, serverParams []
 		rsaPub, ok := cert.PublicKey.(*rsa.PublicKey)
 		if !ok {
 			return nil, nil, c.fatal(record.AlertBadCertificate,
-				fmt.Errorf("tls: RSA key exchange but cert has %T public key", cert.PublicKey))
+				fmt.Errorf("%w (got %T)", errRSAKeyExpected, cert.PublicKey))
 		}
+
 		exchange = ke.NewRSAExchangeWithRand(c.params.Rand, rsaPub)
 	case suites.KexGOST2001, suites.KexGOST2012_256, suites.KexGOST2018_256:
 		e, err := buildGOSTExchange(c)
 		if err != nil {
 			return nil, nil, c.fatal(record.AlertHandshakeFailure, err)
 		}
+
 		exchange = e
 	default:
 		return nil, nil, c.fatal(record.AlertHandshakeFailure,
-			fmt.Errorf("tls: unknown KX kind %d for suite %s", c.suite.KX, c.suite.Name))
+			fmt.Errorf("%w %d for suite %s", errUnknownKXKind, c.suite.KX, c.suite.Name))
 	}
+
+	_ = rawCerts
 
 	ckeBody, preMaster, err := exchange.ClientKeyExchange(serverParams)
 	if err != nil {
 		return nil, nil, c.fatal(record.AlertHandshakeFailure,
 			fmt.Errorf("tls: ClientKeyExchange: %w", err))
 	}
+
 	return preMaster, ckeBody, nil
 }
 
@@ -757,16 +878,16 @@ func (c *ClientState) computeKeyExchange(cert *x509.Certificate, serverParams []
 // sendCertificateVerify.
 func hashForSigAlg(hashByte uint8) (crypto.Hash, error) {
 	switch hashByte {
-	case 0x02:
+	case sigHashSHA1:
 		return crypto.SHA1, nil
-	case 0x04:
+	case sigHashByte:
 		return crypto.SHA256, nil
-	case 0x05:
+	case sigHashSHA384:
 		return crypto.SHA384, nil
-	case 0x06:
+	case sigHashSHA512:
 		return crypto.SHA512, nil
 	default:
-		return 0, fmt.Errorf("unsupported hash algorithm 0x%02x", hashByte)
+		return 0, fmt.Errorf("%w 0x%02x", errUnsupportedHashAlg, hashByte)
 	}
 }
 
@@ -785,6 +906,7 @@ func (c *ClientState) selectClientSigAlg() (SigAndHash, bool) {
 	if c.certReq == nil || len(c.params.Certificates) == 0 {
 		return SigAndHash{}, false
 	}
+
 	key := c.params.Certificates[0].PrivateKey
 
 	// Determine which (hash, sig) combinations the key supports.
@@ -792,17 +914,19 @@ func (c *ClientState) selectClientSigAlg() (SigAndHash, bool) {
 		switch k := key.(type) {
 		case *rsa.PrivateKey:
 			_ = k
-			return alg.Sig == 0x01 // rsa_pkcs1
+			return alg.Sig == sigAlgRSA
 		case *ecdsa.PrivateKey:
-			switch alg.Sig {
-			case 0x03: // ecdsa
-				switch k.Curve {
-				case elliptic.P256():
-					return alg.Hash == 0x04 // sha256
-				case elliptic.P384():
-					return alg.Hash == 0x05 // sha384
-				}
+			if alg.Sig != sigAlgECDSA {
+				return false
 			}
+
+			switch k.Curve {
+			case elliptic.P256():
+				return alg.Hash == sigHashByte // sha256.
+			case elliptic.P384():
+				return alg.Hash == sigHashSHA384 // sha384.
+			}
+
 			return false
 		default:
 			return false
@@ -821,6 +945,7 @@ func (c *ClientState) selectClientSigAlg() (SigAndHash, bool) {
 			return alg, true
 		}
 	}
+
 	return SigAndHash{}, false
 }
 
@@ -834,9 +959,11 @@ func (c *ClientState) selectClientSigAlg() (SigAndHash, bool) {
 // The message is appended to the transcript in either case.
 func (c *ClientState) sendClientCertificate() (sent bool, err error) {
 	alg, algOK := c.selectClientSigAlg()
+
 	_ = alg
 
 	var certMsg *Certificate
+
 	if !algOK || len(c.params.Certificates) == 0 {
 		// Empty Certificate — legal per RFC 5246 §7.4.6.
 		certMsg = &Certificate{}
@@ -850,6 +977,7 @@ func (c *ClientState) sendClientCertificate() (sent bool, err error) {
 	if writeErr := c.layer.WriteRecord(record.ContentTypeHandshake, env); writeErr != nil {
 		return false, c.fatal(record.AlertInternalError, fmt.Errorf("tls: send client Certificate: %w", writeErr))
 	}
+
 	c.transcript.Write(env)
 
 	return algOK && len(c.params.Certificates) > 0, nil
@@ -873,7 +1001,9 @@ func (c *ClientState) sendCertificateVerify(alg SigAndHash) error {
 	}
 
 	key := c.params.Certificates[0].PrivateKey
+
 	var sig []byte
+
 	switch k := key.(type) {
 	case *rsa.PrivateKey:
 		sig, err = rsa.SignPKCS1v15(c.params.Rand, k, cryptoHash, digest)
@@ -887,15 +1017,18 @@ func (c *ClientState) sendCertificateVerify(alg SigAndHash) error {
 		}
 	default:
 		return c.fatal(record.AlertInternalError,
-			fmt.Errorf("tls: CertificateVerify: unsupported key type %T", key))
+			fmt.Errorf("%w %T", errUnsupportedKeyType, key))
 	}
 
 	cv := &CertificateVerify{Algorithm: alg, Signature: sig}
 	env := MarshalMessage(cv)
+
 	if err := c.layer.WriteRecord(record.ContentTypeHandshake, env); err != nil {
 		return c.fatal(record.AlertInternalError, fmt.Errorf("tls: send CertificateVerify: %w", err))
 	}
+
 	c.transcript.Write(env)
+
 	return nil
 }
 
@@ -922,13 +1055,16 @@ func (c *ClientState) expandKeys() (*suites.KeyMaterial, record.Protector, recor
 		ivLen = 0
 	}
 
-	// Compute total key material needed.
+	// Compute total key material needed (2 = client side + server side).
+	const sides = 2
+
 	macKeyLen := c.suite.MAC.KeyLen
 	encKeyLen := c.suite.Cipher.KeyLen
-	totalLen := 2*macKeyLen + 2*encKeyLen + 2*ivLen
+	totalLen := sides*macKeyLen + sides*encKeyLen + sides*ivLen
+
 	if totalLen == 0 {
 		return nil, nil, nil, c.fatal(record.AlertInternalError,
-			fmt.Errorf("tls: key expansion total length is zero for suite %s", c.suite.Name))
+			fmt.Errorf("%w %s", errKeyExpansionZero, c.suite.Name))
 	}
 
 	// Use KeyExpansion. Note: KeyExpansion in suites uses suite.Cipher.FixedIVLen
@@ -944,6 +1080,7 @@ func (c *ClientState) expandKeys() (*suites.KeyMaterial, record.Protector, recor
 		return nil, nil, nil, c.fatal(record.AlertInternalError,
 			fmt.Errorf("tls: build send protector: %w", err))
 	}
+
 	recvProt, err := buildProtector(c.suite, km.ServerEncKey, km.ServerMACKey, km.ServerIV, c.params.Rand)
 	if err != nil {
 		return nil, nil, nil, c.fatal(record.AlertInternalError,
@@ -958,6 +1095,7 @@ func (c *ClientState) fatal(alertDesc uint8, cause error) error {
 	alertBody := record.EncodeAlert(record.AlertLevelFatal, alertDesc)
 	// Best effort: ignore write error since we're already in an error path.
 	_ = c.layer.WriteRecord(record.ContentTypeAlert, alertBody)
+
 	return cause
 }
 
@@ -969,53 +1107,72 @@ func (c *ClientState) readHandshakeRecord() (Type, []byte, error) {
 		if err != nil {
 			return 0, nil, err
 		}
+
 		switch ct {
 		case record.ContentTypeHandshake:
-			if len(payload) < 4 {
-				return 0, nil, fmt.Errorf("tls: handshake record too short: %d bytes", len(payload))
+			const hsHdrLen = 4
+
+			if len(payload) < hsHdrLen {
+				return 0, nil, fmt.Errorf("%w: %d bytes", errHSRecordTooShort, len(payload))
 			}
+
 			msgType := Type(payload[0])
 			bodyLen := uint32(payload[1])<<16 | uint32(payload[2])<<8 | uint32(payload[3])
-			if uint32(len(payload)) < 4+bodyLen {
-				return 0, nil, fmt.Errorf("tls: handshake body truncated: declared %d, have %d", bodyLen, len(payload)-4)
+
+			if uint32(len(payload)) < hsHdrLen+bodyLen {
+				have := len(payload) - hsHdrLen
+				return 0, nil, fmt.Errorf("%w: declared %d, have %d", errHSBodyTruncated, bodyLen, have)
 			}
-			return msgType, payload[4 : 4+bodyLen], nil
+
+			return msgType, payload[hsHdrLen : hsHdrLen+bodyLen], nil
 		case record.ContentTypeAlert:
-			if len(payload) < 2 {
-				return 0, nil, fmt.Errorf("tls: alert record truncated")
+			const alertLen = 2
+
+			if len(payload) < alertLen {
+				return 0, nil, errAlertRecordTruncated
 			}
+
 			level, desc := record.DecodeAlert(payload)
-			return 0, nil, fmt.Errorf("tls: received alert level=%d desc=%d", level, desc)
+
+			return 0, nil, fmt.Errorf("%w level=%d desc=%d", errAlertReceived, level, desc)
 		default:
-			return 0, nil, fmt.Errorf("tls: unexpected record type %d during handshake", ct)
+			return 0, nil, fmt.Errorf("%w %d during handshake", errUnexpectedRecordType, ct)
 		}
 	}
 }
 
 // buildEnvelope wraps a body with the 4-byte handshake envelope.
 func buildEnvelope(msgType Type, body []byte) []byte {
-	env := make([]byte, 4+len(body))
+	env := make([]byte, hsEnvelopeSize+len(body))
+
 	env[0] = byte(msgType)
-	env[1] = byte(len(body) >> 16)
-	env[2] = byte(len(body) >> 8)
+	env[1] = byte(len(body) >> 16) //nolint:mnd // byte-shift arithmetic.
+	env[2] = byte(len(body) >> 8)  //nolint:mnd // byte-shift arithmetic.
 	env[3] = byte(len(body))
-	copy(env[4:], body)
+	copy(env[hsEnvelopeSize:], body)
+
 	return env
 }
 
 // expandKeysManual performs key expansion with an explicit ivLen override.
 // This allows CBC suites to use ivLen=0 while keeping the suite's MAC/enc lengths.
-func expandKeysManual(suite *suites.Suite, masterSecret, clientRandom, serverRandom []byte, ivLen int) (*suites.KeyMaterial, error) {
+func expandKeysManual(
+	suite *suites.Suite, masterSecret, clientRandom, serverRandom []byte, ivLen int,
+) (*suites.KeyMaterial, error) {
 	// seed is server_random || client_random per RFC 5246 §6.3.
-	seed := make([]byte, 64)
-	copy(seed[:32], serverRandom)
-	copy(seed[32:], clientRandom)
+	// tlsRandomLen is 32 (defined in messages.go).
+	const sides = 2 // client side + server side.
+
+	seed := make([]byte, sides*tlsRandomLen)
+	copy(seed[:tlsRandomLen], serverRandom)
+	copy(seed[tlsRandomLen:], clientRandom)
 
 	macKeyLen := suite.MAC.KeyLen
 	encKeyLen := suite.Cipher.KeyLen
-	totalLen := 2*macKeyLen + 2*encKeyLen + 2*ivLen
+	totalLen := sides*macKeyLen + sides*encKeyLen + sides*ivLen
+
 	if totalLen == 0 {
-		return nil, fmt.Errorf("key expansion total length is zero")
+		return nil, errKeyExpansionZeroLocal
 	}
 
 	keyBlock, err := suites.PRF(suite.PRF.Hash, masterSecret, []byte("key expansion"), seed, totalLen)
@@ -1025,19 +1182,30 @@ func expandKeysManual(suite *suites.Suite, masterSecret, clientRandom, serverRan
 
 	km := &suites.KeyMaterial{}
 	off := 0
+
 	if macKeyLen > 0 {
 		km.ClientMACKey = keyBlock[off : off+macKeyLen]
+
 		off += macKeyLen
+
 		km.ServerMACKey = keyBlock[off : off+macKeyLen]
+
 		off += macKeyLen
 	}
+
 	km.ClientEncKey = keyBlock[off : off+encKeyLen]
+
 	off += encKeyLen
+
 	km.ServerEncKey = keyBlock[off : off+encKeyLen]
+
 	off += encKeyLen
+
 	if ivLen > 0 {
 		km.ClientIV = keyBlock[off : off+ivLen]
+
 		off += ivLen
+
 		km.ServerIV = keyBlock[off : off+ivLen]
 	}
 

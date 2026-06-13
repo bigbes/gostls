@@ -1,0 +1,103 @@
+version: "2"
+
+run:
+  timeout: 3m
+
+formatters:
+  enable:
+    - goimports
+
+issues:
+  # Disable limits on the number of printed issues
+  max-issues-per-linter: 0 # 0 = no limit
+  max-same-issues: 0 # 0 = no limit
+
+linters:
+  default: all
+
+  disable:
+    - dupl # Dupl is disabled, since we're generating a lot of boilerplate code.
+    - cyclop # Cyclop is disabled, since cyclomatic complexities is very abstract metric,
+      # that sometimes lead to strange linter behaviour.
+    - wsl # WSL is disabled, since it's obsolete. Using WSL_v5.
+    - nlreturn # nlreturn is disabled, since it's duplicated by wsl_v5.return check.
+    - ireturn # ireturn is disabled, since it's not needed.
+    - godox # godox is disabled to allow TODO comments for unimplemented functionality.
+    - gocognit # gocognit is disabled, cognitive complexity is too restrictive.
+    - funlen # funlen is disabled, function length limits are too restrictive.
+    - maintidx # maintidx is disabled, purpose of this metric is unknown.
+
+    # The following are disabled for this pure-Go GOST TLS module: their checks
+    # fight the domain idioms (short crypto/protocol variable names mirroring the
+    # TLS and GOST specs, package-level constant/suite tables) or are noise on a
+    # record/handshake state machine ported against an RFC.
+    - varnamelen # TLS/GOST code uses short names (p, g, k, n, ct) per the spec.
+    - gochecknoglobals # suite registries / constant tables must be package globals.
+    - exhaustruct # struct literals are intentionally partial across the API.
+    - gosec # false positives on GOST primitives (weak-crypto / rand heuristics).
+    - wrapcheck # internal sub-packages return their own errors unwrapped by design.
+    - goconst # repeated small literals in KATs/tables are not worth extracting.
+    - noinlineerr # inline `if err := ...; err != nil` is idiomatic here.
+    - nonamedreturns # named returns are used deliberately in a few helpers.
+    - godoclint # doc-comment formatting is not enforced for this module.
+    - gochecknoinits # init() is used to build lookup tables at load time.
+    - inamedparam # interface params are intentionally left unnamed.
+    - intrange # not migrating loop forms mechanically.
+    - gocritic # opinionated style suggestions, not enforced here.
+    - revive # var-naming overlaps with the crypto short-name idiom above.
+
+  exclusions:
+    generated: lax
+    rules:
+      - path: _test.go
+        linters:
+          - wrapcheck
+          - err113
+          - funlen
+
+  settings:
+    varnamelen:
+      ignore-names:
+        - tt
+        - ok
+        - tb
+    revive:
+      rules:
+        - name: var-naming
+          arguments:
+            - []
+            - []
+            - - skip-package-name-checks: true
+
+    godot:
+      scope: all
+    lll:
+      line-length: 120
+      tab-width: 4
+    wsl_v5:
+      allow-first-in-block: true
+      allow-whole-block: false
+      branch-max-lines: 2
+      case-max-lines: 0
+      default: all
+    depguard:
+      rules:
+        main:
+          files:
+            - "$all"
+            - "!$test"
+          allow:
+            - $gostd
+            - "github.com/bigbes/gostls"
+            - "github.com/bigbes/gostcrypto"
+            - "filippo.io/bigmod"
+            - "golang.org/x/crypto"
+        test:
+          files:
+            - "$test"
+          allow:
+            - $gostd
+            - "github.com/bigbes/gostls"
+            - "github.com/bigbes/gostcrypto"
+            - "filippo.io/bigmod"
+            - "golang.org/x/crypto"

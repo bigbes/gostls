@@ -1,3 +1,4 @@
+//nolint:testpackage // white-box: exercises unexported methods (recvServerFlight, selectClientSigAlg, etc.)
 package handshake
 
 // Tests for Phase 2: accepting optional CertificateRequest in the server
@@ -12,6 +13,7 @@ package handshake
 
 import (
 	"bytes"
+	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -29,19 +31,21 @@ import (
 
 // -----------------------------------------------------------------------
 // low-level wire helpers
-// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------.
 
 // buildHSRecord encodes a single TLS handshake record containing exactly one
 // handshake message (type + 3-byte length + body).
 func buildHSRecord(msgType Type, body []byte) []byte {
 	hsMsg := buildEnvelope(msgType, body)
 	rec := make([]byte, 5+len(hsMsg))
+
 	rec[0] = record.ContentTypeHandshake
 	rec[1] = 0x03
 	rec[2] = 0x03
 	rec[3] = byte(len(hsMsg) >> 8)
 	rec[4] = byte(len(hsMsg))
 	copy(rec[5:], hsMsg)
+
 	return rec
 }
 
@@ -59,36 +63,44 @@ func (rw *readWriteBuffer) Write(p []byte) (int, error) { return rw.w.Write(p) }
 // and pre-loaded wire bytes.
 func makeClientStateForFlight(t *testing.T, wire []byte, suite *suites.Suite) *ClientState {
 	t.Helper()
+
 	rw := &readWriteBuffer{r: bytes.NewBuffer(wire), w: new(bytes.Buffer)}
 	layer := record.NewLayer(rw)
 	c := NewClientState(layer, ClientParams{InsecureSkipVerify: true})
+
 	c.suite = suite
+
 	return c
 }
 
 // mustLookupSuite looks up a suite by name and fails the test if not found.
 func mustLookupSuite(t *testing.T, name string) *suites.Suite {
 	t.Helper()
+
 	for _, s := range suites.All() {
 		if s.Name == name {
 			return s
 		}
 	}
+
 	t.Fatalf("suite %q not found in registry", name)
+
 	return nil
 }
 
 // -----------------------------------------------------------------------
 // cert / SKE builders
-// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------.
 
 // newTestECDSACert creates a minimal self-signed ECDSA P-256 cert.
 func newTestECDSACert(t *testing.T) (*ecdsa.PrivateKey, *x509.Certificate) {
 	t.Helper()
+
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatalf("generate ECDSA key: %v", err)
 	}
+
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject:      pkix.Name{CommonName: "test"},
@@ -96,14 +108,17 @@ func newTestECDSACert(t *testing.T) (*ecdsa.PrivateKey, *x509.Certificate) {
 		NotAfter:     time.Now().Add(time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 	}
+
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
 	if err != nil {
 		t.Fatalf("create cert: %v", err)
 	}
+
 	cert, err := x509.ParseCertificate(der)
 	if err != nil {
 		t.Fatalf("parse cert: %v", err)
 	}
+
 	return priv, cert
 }
 
@@ -111,10 +126,12 @@ func newTestECDSACert(t *testing.T) (*ecdsa.PrivateKey, *x509.Certificate) {
 // key, parsed cert, and DER bytes.
 func newTestRSACert(t *testing.T) (*rsa.PrivateKey, *x509.Certificate, []byte) {
 	t.Helper()
+
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatalf("generate RSA key: %v", err)
 	}
+
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(2),
 		Subject:      pkix.Name{CommonName: "client"},
@@ -122,14 +139,17 @@ func newTestRSACert(t *testing.T) (*rsa.PrivateKey, *x509.Certificate, []byte) {
 		NotAfter:     time.Now().Add(time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 	}
+
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
 	if err != nil {
 		t.Fatalf("create RSA cert: %v", err)
 	}
+
 	cert, err := x509.ParseCertificate(der)
 	if err != nil {
 		t.Fatalf("parse RSA cert: %v", err)
 	}
+
 	return priv, cert, der
 }
 
@@ -137,10 +157,12 @@ func newTestRSACert(t *testing.T) (*rsa.PrivateKey, *x509.Certificate, []byte) {
 // returns the private key, parsed cert, and DER bytes.
 func newTestECDSACertWithDER(t *testing.T) (*ecdsa.PrivateKey, *x509.Certificate, []byte) {
 	t.Helper()
+
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatalf("generate ECDSA key: %v", err)
 	}
+
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(3),
 		Subject:      pkix.Name{CommonName: "ecdsa-client"},
@@ -148,110 +170,120 @@ func newTestECDSACertWithDER(t *testing.T) (*ecdsa.PrivateKey, *x509.Certificate
 		NotAfter:     time.Now().Add(time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 	}
+
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
 	if err != nil {
 		t.Fatalf("create ECDSA cert: %v", err)
 	}
+
 	cert, err := x509.ParseCertificate(der)
 	if err != nil {
 		t.Fatalf("parse ECDSA cert: %v", err)
 	}
+
 	return priv, cert, der
 }
 
 // buildECDHESKEBody builds a valid ECDHE ServerKeyExchange body signed with priv.
 func buildECDHESKEBody(t *testing.T, priv *ecdsa.PrivateKey, clientRandom, serverRandom [32]byte) []byte {
 	t.Helper()
-	eph, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+
+	// Generate an ephemeral key using crypto/ecdh (avoids deprecated elliptic.Marshal).
+	// The public point is used in ServerECDHParams; priv (the func param) signs the body.
+	ephECDH, err := ecdh.P256().GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("gen ephemeral key: %v", err)
 	}
-	point := elliptic.Marshal(elliptic.P256(), eph.PublicKey.X, eph.PublicKey.Y)
 
-	// ServerECDHParams: curve_type(3=named) || named_curve(P-256=0x0017) || point_len || point
-	var params []byte
+	point := ephECDH.PublicKey().Bytes() // uncompressed P-256 point.
+
+	// ServerECDHParams: curve_type(3=named) || named_curve(P-256=0x0017) || point_len || point.
+	params := make([]byte, 0, 4+len(point))
+
 	params = append(params, 0x03)
 	params = append(params, 0x00, 0x17)
 	params = append(params, byte(len(point)))
 	params = append(params, point...)
 
-	// Signed data: clientRandom || serverRandom || params
+	// Signed data: clientRandom || serverRandom || params.
 	signed := make([]byte, 64+len(params))
 	copy(signed[:32], clientRandom[:])
 	copy(signed[32:64], serverRandom[:])
 	copy(signed[64:], params)
 
 	digest := sha256.Sum256(signed)
+
 	sig, err := ecdsa.SignASN1(rand.Reader, priv, digest[:])
 	if err != nil {
 		t.Fatalf("sign SKE: %v", err)
 	}
 
 	// body: params || hashAlg(sha256=0x04) || sigAlg(ecdsa=0x03) || uint16(sigLen) || sig
-	var body []byte
+	body := make([]byte, 0, len(params)+2+2+len(sig))
+
 	body = append(body, params...)
 	body = append(body, 0x04, 0x03)
 	body = append(body, byte(len(sig)>>8), byte(len(sig)))
 	body = append(body, sig...)
+
 	return body
 }
 
 // buildCertReqBody builds a minimal CertificateRequest wire body.
 func buildCertReqBody(certTypes []uint8) []byte {
-	sigAlgs := []SigAndHash{{Hash: 0x04, Sig: 0x01}} // sha256+rsa
-	var body []byte
-	body = append(body, byte(len(certTypes)))
-	body = append(body, certTypes...)
-	sigBytes := make([]byte, 2*len(sigAlgs))
-	for i, sa := range sigAlgs {
-		sigBytes[2*i] = sa.Hash
-		sigBytes[2*i+1] = sa.Sig
-	}
-	body = append(body, byte(len(sigBytes)>>8), byte(len(sigBytes)))
-	body = append(body, sigBytes...)
-	body = append(body, 0x00, 0x00) // empty CA list
-	return body
-}
+	sigAlgs := []SigAndHash{{Hash: 0x04, Sig: 0x01}} // sha256+rsa.
 
-// buildCertReqBodyWithAlgs builds a CertificateRequest with given sig algs.
-func buildCertReqBodyWithAlgs(certTypes []uint8, sigAlgs []SigAndHash) []byte {
-	var body []byte
+	body := make([]byte, 0, 1+len(certTypes)+2+len(sigAlgs)*2+2)
+
 	body = append(body, byte(len(certTypes)))
 	body = append(body, certTypes...)
+
 	sigBytes := make([]byte, 2*len(sigAlgs))
+
 	for i, sa := range sigAlgs {
 		sigBytes[2*i] = sa.Hash
 		sigBytes[2*i+1] = sa.Sig
 	}
+
 	body = append(body, byte(len(sigBytes)>>8), byte(len(sigBytes)))
 	body = append(body, sigBytes...)
-	body = append(body, 0x00, 0x00) // empty CA list
+	body = append(body, 0x00, 0x00) // empty CA list.
+
 	return body
 }
 
 // -----------------------------------------------------------------------
 // Test 1: happy path — SKE + CertReq + SHD (ECDHE suite)
-// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------.
 
 func TestRecvServerFlight_SKE_CertReq_SHD(t *testing.T) {
+	t.Parallel()
+
 	priv, cert := newTestECDSACert(t)
 
 	var clientRandom, serverRandom [32]byte
+
 	for i := range clientRandom {
 		clientRandom[i] = byte(i)
 		serverRandom[i] = byte(i + 32)
 	}
 
 	skeBody := buildECDHESKEBody(t, priv, clientRandom, serverRandom)
-	certReqBody := buildCertReqBody([]uint8{0x01, 0x02}) // rsa_sign, dss_sign
+	certReqBody := buildCertReqBody([]uint8{0x01, 0x02}) // rsa_sign, dss_sign.
 
-	var wire []byte
-	wire = append(wire, buildHSRecord(TypeServerKeyExchange, skeBody)...)
-	wire = append(wire, buildHSRecord(TypeCertificateRequest, certReqBody)...)
-	wire = append(wire, buildHSRecord(TypeServerHelloDone, nil)...)
+	skeRec := buildHSRecord(TypeServerKeyExchange, skeBody)
+	certReqRec := buildHSRecord(TypeCertificateRequest, certReqBody)
+	shdRec := buildHSRecord(TypeServerHelloDone, nil)
+
+	wire := make([]byte, 0, len(skeRec)+len(certReqRec)+len(shdRec))
+
+	wire = append(wire, skeRec...)
+	wire = append(wire, certReqRec...)
+	wire = append(wire, shdRec...)
 
 	suite := mustLookupSuite(t, "ECDHE-RSA-AES128-SHA256")
 	c := makeClientStateForFlight(t, wire, suite)
+
 	c.clientRandom = clientRandom
 	c.serverRandom = serverRandom
 
@@ -259,15 +291,19 @@ func TestRecvServerFlight_SKE_CertReq_SHD(t *testing.T) {
 	if err != nil {
 		t.Fatalf("recvServerFlight: %v", err)
 	}
+
 	if serverKeyExchParams == nil {
 		t.Error("expected serverKeyExchParams to be non-nil")
 	}
+
 	if c.certReq == nil {
 		t.Fatal("expected certReq to be set, got nil")
 	}
+
 	if len(c.certReq.CertificateTypes) != 2 {
 		t.Errorf("CertificateTypes: got %v, want [0x01 0x02]", c.certReq.CertificateTypes)
 	}
+
 	if c.certReq.CertificateTypes[0] != 0x01 || c.certReq.CertificateTypes[1] != 0x02 {
 		t.Errorf("CertificateTypes values wrong: %v", c.certReq.CertificateTypes)
 	}
@@ -275,28 +311,37 @@ func TestRecvServerFlight_SKE_CertReq_SHD(t *testing.T) {
 
 // -----------------------------------------------------------------------
 // Test 2: happy path — CertReq only, no SKE (RSA suite)
-// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------.
 
 func TestRecvServerFlight_CertReq_NoSKE(t *testing.T) {
-	certReqBody := buildCertReqBody([]uint8{0x01}) // rsa_sign
+	t.Parallel()
 
-	var wire []byte
-	wire = append(wire, buildHSRecord(TypeCertificateRequest, certReqBody)...)
-	wire = append(wire, buildHSRecord(TypeServerHelloDone, nil)...)
+	certReqBody := buildCertReqBody([]uint8{0x01}) // rsa_sign.
 
-	suite := mustLookupSuite(t, "AES128-SHA256") // KexRSA
+	certReqRec := buildHSRecord(TypeCertificateRequest, certReqBody)
+	shdRec := buildHSRecord(TypeServerHelloDone, nil)
+
+	wire := make([]byte, 0, len(certReqRec)+len(shdRec))
+
+	wire = append(wire, certReqRec...)
+	wire = append(wire, shdRec...)
+
+	suite := mustLookupSuite(t, "AES128-SHA256") // KexRSA.
 	c := makeClientStateForFlight(t, wire, suite)
 
 	serverKeyExchParams, err := c.recvServerFlight(nil)
 	if err != nil {
 		t.Fatalf("recvServerFlight: %v", err)
 	}
+
 	if serverKeyExchParams != nil {
 		t.Errorf("expected serverKeyExchParams nil for RSA (no SKE), got %x", serverKeyExchParams)
 	}
+
 	if c.certReq == nil {
 		t.Fatal("expected certReq to be set, got nil")
 	}
+
 	if len(c.certReq.CertificateTypes) != 1 || c.certReq.CertificateTypes[0] != 0x01 {
 		t.Errorf("CertificateTypes: got %v, want [0x01]", c.certReq.CertificateTypes)
 	}
@@ -304,12 +349,15 @@ func TestRecvServerFlight_CertReq_NoSKE(t *testing.T) {
 
 // -----------------------------------------------------------------------
 // Test 3: no CertReq — existing flow, SKE + SHD (ECDHE suite)
-// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------.
 
 func TestRecvServerFlight_SKE_SHD_NoCertReq(t *testing.T) {
+	t.Parallel()
+
 	priv, cert := newTestECDSACert(t)
 
 	var clientRandom, serverRandom [32]byte
+
 	for i := range clientRandom {
 		clientRandom[i] = byte(i + 64)
 		serverRandom[i] = byte(i + 96)
@@ -317,12 +365,17 @@ func TestRecvServerFlight_SKE_SHD_NoCertReq(t *testing.T) {
 
 	skeBody := buildECDHESKEBody(t, priv, clientRandom, serverRandom)
 
-	var wire []byte
-	wire = append(wire, buildHSRecord(TypeServerKeyExchange, skeBody)...)
-	wire = append(wire, buildHSRecord(TypeServerHelloDone, nil)...)
+	skeRec := buildHSRecord(TypeServerKeyExchange, skeBody)
+	shdRec := buildHSRecord(TypeServerHelloDone, nil)
+
+	wire := make([]byte, 0, len(skeRec)+len(shdRec))
+
+	wire = append(wire, skeRec...)
+	wire = append(wire, shdRec...)
 
 	suite := mustLookupSuite(t, "ECDHE-RSA-AES128-SHA256")
 	c := makeClientStateForFlight(t, wire, suite)
+
 	c.clientRandom = clientRandom
 	c.serverRandom = serverRandom
 
@@ -330,9 +383,11 @@ func TestRecvServerFlight_SKE_SHD_NoCertReq(t *testing.T) {
 	if err != nil {
 		t.Fatalf("recvServerFlight: %v", err)
 	}
+
 	if serverKeyExchParams == nil {
 		t.Error("expected serverKeyExchParams set, got nil")
 	}
+
 	if c.certReq != nil {
 		t.Errorf("expected certReq nil (no CertReq in wire), got %+v", c.certReq)
 	}
@@ -340,17 +395,23 @@ func TestRecvServerFlight_SKE_SHD_NoCertReq(t *testing.T) {
 
 // -----------------------------------------------------------------------
 // Test 4: duplicate CertReq → fatal error
-// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------.
 
 func TestRecvServerFlight_DuplicateCertReq(t *testing.T) {
+	t.Parallel()
+
 	certReqBody := buildCertReqBody([]uint8{0x01})
 
-	var wire []byte
-	wire = append(wire, buildHSRecord(TypeCertificateRequest, certReqBody)...)
-	wire = append(wire, buildHSRecord(TypeCertificateRequest, certReqBody)...)
-	wire = append(wire, buildHSRecord(TypeServerHelloDone, nil)...)
+	certReqRec := buildHSRecord(TypeCertificateRequest, certReqBody)
+	shdRec := buildHSRecord(TypeServerHelloDone, nil)
 
-	suite := mustLookupSuite(t, "AES128-SHA256") // KexRSA
+	wire := make([]byte, 0, len(certReqRec)+len(certReqRec)+len(shdRec))
+
+	wire = append(wire, certReqRec...)
+	wire = append(wire, certReqRec...)
+	wire = append(wire, shdRec...)
+
+	suite := mustLookupSuite(t, "AES128-SHA256") // KexRSA.
 	c := makeClientStateForFlight(t, wire, suite)
 
 	_, err := c.recvServerFlight(nil)
@@ -361,19 +422,26 @@ func TestRecvServerFlight_DuplicateCertReq(t *testing.T) {
 
 // -----------------------------------------------------------------------
 // Test 5: out-of-order — SKE after CertReq → fatal error
-// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------.
 
 func TestRecvServerFlight_SKEAfterCertReq(t *testing.T) {
+	t.Parallel()
+
 	certReqBody := buildCertReqBody([]uint8{0x01})
 	// A minimal fake SKE body that would parse (the error fires before verification).
-	skeBody := []byte{0x03, 0x00, 0x17, 0x04} // too short to be valid, but error is out-of-order
+	skeBody := []byte{0x03, 0x00, 0x17, 0x04} // too short to be valid, but error is out-of-order.
 
-	var wire []byte
-	wire = append(wire, buildHSRecord(TypeCertificateRequest, certReqBody)...)
-	wire = append(wire, buildHSRecord(TypeServerKeyExchange, skeBody)...)
-	wire = append(wire, buildHSRecord(TypeServerHelloDone, nil)...)
+	certReqRec := buildHSRecord(TypeCertificateRequest, certReqBody)
+	skeRec := buildHSRecord(TypeServerKeyExchange, skeBody)
+	shdRec := buildHSRecord(TypeServerHelloDone, nil)
 
-	suite := mustLookupSuite(t, "AES128-SHA256") // KexRSA
+	wire := make([]byte, 0, len(certReqRec)+len(skeRec)+len(shdRec))
+
+	wire = append(wire, certReqRec...)
+	wire = append(wire, skeRec...)
+	wire = append(wire, shdRec...)
+
+	suite := mustLookupSuite(t, "AES128-SHA256") // KexRSA.
 	c := makeClientStateForFlight(t, wire, suite)
 
 	_, err := c.recvServerFlight(nil)
@@ -384,7 +452,7 @@ func TestRecvServerFlight_SKEAfterCertReq(t *testing.T) {
 
 // -----------------------------------------------------------------------
 // Phase 3 Tests: selectClientSigAlg
-// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------.
 
 // newMinimalClientState builds a minimal ClientState with a certReq and optional
 // client certificates, suitable for testing selectClientSigAlg.
@@ -402,13 +470,15 @@ func newMinimalClientState(certs []ClientCertificate, serverAlgs []SigAndHash) *
 // TestSelectClientSigAlg_RSA_Server_SHA256_SHA384 tests that an RSA key with
 // server offering [sha256+rsa, sha384+rsa] picks sha256+rsa (first advertised).
 func TestSelectClientSigAlg_RSA_Server_SHA256_SHA384(t *testing.T) {
+	t.Parallel()
+
 	rsaKey, _, _ := newTestRSACert(t)
 
 	c := newMinimalClientState(
 		[]ClientCertificate{{PrivateKey: rsaKey}},
 		[]SigAndHash{
-			{Hash: 0x04, Sig: 0x01}, // sha256+rsa
-			{Hash: 0x05, Sig: 0x01}, // sha384+rsa
+			{Hash: 0x04, Sig: 0x01}, // sha256+rsa.
+			{Hash: 0x05, Sig: 0x01}, // sha384+rsa.
 		},
 	)
 
@@ -416,6 +486,7 @@ func TestSelectClientSigAlg_RSA_Server_SHA256_SHA384(t *testing.T) {
 	if !ok {
 		t.Fatal("selectClientSigAlg: expected match, got false")
 	}
+
 	// Must be the first entry in clientSigAlgsAdvertised that the server also supports.
 	// Our ClientHello advertise list: {sha256+rsa, sha384+rsa, sha256+ecdsa, sha384+ecdsa, sha1+rsa}
 	// Server has sha256+rsa and sha384+rsa; RSA key compatible with both.
@@ -428,12 +499,14 @@ func TestSelectClientSigAlg_RSA_Server_SHA256_SHA384(t *testing.T) {
 // TestSelectClientSigAlg_ECDSA_P256_ServerOnlyHasSHA384ECDSA tests that a P-256
 // ECDSA key returns false when server only offers sha384+ecdsa (P-256 is sha256).
 func TestSelectClientSigAlg_ECDSA_P256_ServerOnlyHasSHA384ECDSA(t *testing.T) {
-	ecKey, _, _ := newTestECDSACertWithDER(t) // P-256
+	t.Parallel()
+
+	ecKey, _, _ := newTestECDSACertWithDER(t) // P-256.
 
 	c := newMinimalClientState(
 		[]ClientCertificate{{PrivateKey: ecKey}},
 		[]SigAndHash{
-			{Hash: 0x05, Sig: 0x03}, // sha384+ecdsa only
+			{Hash: 0x05, Sig: 0x03}, // sha384+ecdsa only.
 		},
 	)
 
@@ -446,12 +519,14 @@ func TestSelectClientSigAlg_ECDSA_P256_ServerOnlyHasSHA384ECDSA(t *testing.T) {
 // TestSelectClientSigAlg_RSA_ServerOnlyHasSHA512 tests that when server only
 // offers sha512+rsa (not in our ClientHello advertise list), returns false.
 func TestSelectClientSigAlg_RSA_ServerOnlyHasSHA512(t *testing.T) {
+	t.Parallel()
+
 	rsaKey, _, _ := newTestRSACert(t)
 
 	c := newMinimalClientState(
 		[]ClientCertificate{{PrivateKey: rsaKey}},
 		[]SigAndHash{
-			{Hash: 0x06, Sig: 0x01}, // sha512+rsa — not in our advertised list
+			{Hash: 0x06, Sig: 0x01}, // sha512+rsa — not in our advertised list.
 		},
 	)
 
@@ -463,6 +538,8 @@ func TestSelectClientSigAlg_RSA_ServerOnlyHasSHA512(t *testing.T) {
 
 // TestSelectClientSigAlg_NilCertReq tests that nil certReq returns false.
 func TestSelectClientSigAlg_NilCertReq(t *testing.T) {
+	t.Parallel()
+
 	rsaKey, _, _ := newTestRSACert(t)
 
 	c := &ClientState{
@@ -480,6 +557,8 @@ func TestSelectClientSigAlg_NilCertReq(t *testing.T) {
 
 // TestSelectClientSigAlg_EmptyCertificates tests that no client certs returns false.
 func TestSelectClientSigAlg_EmptyCertificates(t *testing.T) {
+	t.Parallel()
+
 	c := newMinimalClientState(
 		nil,
 		[]SigAndHash{{Hash: 0x04, Sig: 0x01}},
@@ -493,18 +572,21 @@ func TestSelectClientSigAlg_EmptyCertificates(t *testing.T) {
 
 // -----------------------------------------------------------------------
 // Phase 3 Tests: sendClientCertificate wire bytes
-// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------.
 
 // makeRecordLayerWithCapture returns a record layer whose writes go to a buffer.
 func makeRecordLayerWithCapture() (*record.Layer, *bytes.Buffer) {
 	w := new(bytes.Buffer)
 	rw := &readWriteBuffer{r: new(bytes.Buffer), w: w}
+
 	return record.NewLayer(rw), w
 }
 
 // TestSendClientCertificate_Empty verifies that empty Certificates → empty cert
 // message: handshake type 0x0b, 3-byte zero body (7 bytes total payload).
 func TestSendClientCertificate_Empty(t *testing.T) {
+	t.Parallel()
+
 	layer, w := makeRecordLayerWithCapture()
 
 	c := &ClientState{
@@ -517,6 +599,7 @@ func TestSendClientCertificate_Empty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sendClientCertificate: unexpected error: %v", err)
 	}
+
 	if sent {
 		t.Fatal("sendClientCertificate: expected sent=false for empty cert list")
 	}
@@ -532,13 +615,16 @@ func TestSendClientCertificate_Empty(t *testing.T) {
 	if len(written) < 5 {
 		t.Fatalf("output too short: %x", written)
 	}
+
 	if written[0] != record.ContentTypeHandshake {
 		t.Errorf("content type 0x%02x, want 0x%02x (handshake)", written[0], record.ContentTypeHandshake)
 	}
+
 	payloadLen := int(written[3])<<8 | int(written[4])
 	if len(written) < 5+payloadLen {
 		t.Fatalf("record truncated: have %d, need %d", len(written), 5+payloadLen)
 	}
+
 	payload := written[5 : 5+payloadLen]
 	if !bytes.Equal(payload, want) {
 		t.Errorf("payload = %x\nwant    = %x", payload, want)
@@ -548,6 +634,8 @@ func TestSendClientCertificate_Empty(t *testing.T) {
 // TestSendClientCertificate_OneRSACert verifies that a single RSA cert produces
 // a Certificate message containing the DER bytes.
 func TestSendClientCertificate_OneRSACert(t *testing.T) {
+	t.Parallel()
+
 	rsaKey, _, der := newTestRSACert(t)
 
 	layer, w := makeRecordLayerWithCapture()
@@ -562,7 +650,7 @@ func TestSendClientCertificate_OneRSACert(t *testing.T) {
 		transcript: NewTranscript(),
 		certReq: &CertificateRequest{
 			SupportedSignatureAlgs: []SigAndHash{
-				{Hash: 0x04, Sig: 0x01}, // sha256+rsa
+				{Hash: 0x04, Sig: 0x01}, // sha256+rsa.
 			},
 		},
 	}
@@ -571,6 +659,7 @@ func TestSendClientCertificate_OneRSACert(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sendClientCertificate: %v", err)
 	}
+
 	if !sent {
 		t.Fatal("sendClientCertificate: expected sent=true for RSA cert")
 	}
@@ -580,10 +669,12 @@ func TestSendClientCertificate_OneRSACert(t *testing.T) {
 	if len(written) < 5 {
 		t.Fatalf("output too short: %x", written)
 	}
+
 	payloadLen := int(written[3])<<8 | int(written[4])
 	if len(written) < 5+payloadLen {
 		t.Fatalf("record truncated")
 	}
+
 	payload := written[5 : 5+payloadLen]
 
 	// msg type = 0x0b (Certificate).
@@ -599,12 +690,14 @@ func TestSendClientCertificate_OneRSACert(t *testing.T) {
 
 // -----------------------------------------------------------------------
 // Phase 3 Tests: sendCertificateVerify
-// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------.
 
 // TestSendCertificateVerify_RSA verifies that sendCertificateVerify with an RSA
 // key produces a CertificateVerify message whose signature verifies against the
 // transcript.
 func TestSendCertificateVerify_RSA(t *testing.T) {
+	t.Parallel()
+
 	rsaKey, _, _ := newTestRSACert(t)
 
 	layer, w := makeRecordLayerWithCapture()
@@ -619,7 +712,7 @@ func TestSendCertificateVerify_RSA(t *testing.T) {
 		transcript: tr,
 	}
 
-	alg := SigAndHash{Hash: 0x04, Sig: 0x01} // sha256+rsa
+	alg := SigAndHash{Hash: 0x04, Sig: 0x01} // sha256+rsa.
 	if err := c.sendCertificateVerify(alg); err != nil {
 		t.Fatalf("sendCertificateVerify: %v", err)
 	}
@@ -629,6 +722,7 @@ func TestSendCertificateVerify_RSA(t *testing.T) {
 	if len(written) < 5 {
 		t.Fatalf("no output")
 	}
+
 	payloadLen := int(written[3])<<8 | int(written[4])
 	payload := written[5 : 5+payloadLen]
 
@@ -637,7 +731,12 @@ func TestSendCertificateVerify_RSA(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse CertificateVerify: %v", err)
 	}
-	cvMsg := cv.(*CertificateVerify)
+
+	cvMsg, ok := cv.(*CertificateVerify)
+	if !ok {
+		t.Fatalf("expected *CertificateVerify, got %T", cv)
+	}
+
 	if cvMsg.Algorithm.Hash != 0x04 || cvMsg.Algorithm.Sig != 0x01 {
 		t.Errorf("algorithm mismatch: got {0x%02x,0x%02x}", cvMsg.Algorithm.Hash, cvMsg.Algorithm.Sig)
 	}
@@ -648,11 +747,14 @@ func TestSendCertificateVerify_RSA(t *testing.T) {
 	if hashErr != nil {
 		t.Fatalf("hashForSigAlg: %v", hashErr)
 	}
+
 	h := cryptoHash.New()
 	h.Write([]byte("fake transcript data for testing"))
+
 	expectedDigest := h.Sum(nil)
 
-	if verifyErr := rsa.VerifyPKCS1v15(&rsaKey.PublicKey, cryptoHash, expectedDigest, cvMsg.Signature); verifyErr != nil {
+	verifyErr := rsa.VerifyPKCS1v15(&rsaKey.PublicKey, cryptoHash, expectedDigest, cvMsg.Signature)
+	if verifyErr != nil {
 		t.Errorf("signature verification failed: %v", verifyErr)
 	}
 }

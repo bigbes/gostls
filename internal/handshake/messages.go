@@ -5,6 +5,22 @@ import (
 	"fmt"
 )
 
+// Protocol field widths and limits used in message parsing/marshaling.
+const (
+	// randomLen is the TLS client/server random field size (RFC 5246 §7.4.1.2).
+	tlsRandomLen = 32
+
+	// maxSessionIDLen is the maximum session_id length (RFC 5246 §7.4.1.2).
+	maxSessionIDLen = 32
+
+	// certEntryOverhead is the number of prefix bytes per cert in a Certificate message:
+	// one uint24 length field.
+	certEntryOverhead = sizeUint24
+
+	// certListOverhead is the outer uint24 length prefix in a Certificate message.
+	certListOverhead = sizeUint24
+)
+
 // ClientHello is the TLS 1.2 ClientHello message (RFC 5246 §7.4.1.2).
 type ClientHello struct {
 	Version            uint16
@@ -36,8 +52,10 @@ func (m *ClientHello) Marshal() []byte {
 	out = appendLenPrefixed8(out, m.SessionID)
 
 	// cipher_suites: uint16 length (in bytes) + uint16 values.
-	csLen := uint16(2 * len(m.CipherSuites))
+	csLen := uint16(pairSize * len(m.CipherSuites))
+
 	out = appendUint16(out, csLen)
+
 	for _, cs := range m.CipherSuites {
 		out = appendUint16(out, cs)
 	}
@@ -70,15 +88,18 @@ func parseClientHello(b []byte) (*ClientHello, error) {
 	if err != nil {
 		return nil, fmt.Errorf("handshake: ClientHello version: %w", err)
 	}
+
 	m.Version = v
 	b = rest
 
 	// random[32].
-	rawRandom, rest, err := readBytes(b, 32)
+	rawRandom, rest, err := readBytes(b, tlsRandomLen)
 	if err != nil {
 		return nil, fmt.Errorf("handshake: ClientHello random: %w", err)
 	}
+
 	copy(m.Random[:], rawRandom)
+
 	b = rest
 
 	// session_id: uint8 length prefix, max 32.
@@ -86,12 +107,15 @@ func parseClientHello(b []byte) (*ClientHello, error) {
 	if err != nil {
 		return nil, fmt.Errorf("handshake: ClientHello session_id: %w", err)
 	}
-	if len(sid) > 32 {
-		return nil, fmt.Errorf("handshake: ClientHello session_id length %d exceeds 32", len(sid))
+
+	if len(sid) > maxSessionIDLen {
+		return nil, fmt.Errorf("%w: %d", errCHSessionIDTooLong, len(sid))
 	}
+
 	if len(sid) > 0 {
 		m.SessionID = append([]byte(nil), sid...)
 	}
+
 	b = rest
 
 	// cipher_suites: uint16 byte-length prefix + uint16 values.
@@ -99,16 +123,20 @@ func parseClientHello(b []byte) (*ClientHello, error) {
 	if err != nil {
 		return nil, fmt.Errorf("handshake: ClientHello cipher_suites: %w", err)
 	}
+
 	if len(csBytes)%2 != 0 {
-		return nil, fmt.Errorf("handshake: ClientHello cipher_suites has odd byte count %d", len(csBytes))
+		return nil, fmt.Errorf("%w: %d", errCHCSOddByteCount, len(csBytes))
 	}
-	if len(csBytes) < 2 {
-		return nil, fmt.Errorf("handshake: ClientHello cipher_suites must have at least one suite")
+
+	if len(csBytes) < pairSize {
+		return nil, errCHCSAtLeastOne
 	}
-	m.CipherSuites = make([]uint16, len(csBytes)/2)
+
+	m.CipherSuites = make([]uint16, len(csBytes)/pairSize)
 	for i := range m.CipherSuites {
-		m.CipherSuites[i] = uint16(csBytes[2*i])<<8 | uint16(csBytes[2*i+1])
+		m.CipherSuites[i] = uint16(csBytes[pairSize*i])<<bitsPerByte | uint16(csBytes[pairSize*i+1])
 	}
+
 	b = rest
 
 	// compression_methods: uint8 length + bytes; at least one (null).
@@ -116,9 +144,11 @@ func parseClientHello(b []byte) (*ClientHello, error) {
 	if err != nil {
 		return nil, fmt.Errorf("handshake: ClientHello compression_methods: %w", err)
 	}
+
 	if len(cm) == 0 {
-		return nil, fmt.Errorf("handshake: ClientHello compression_methods must have at least one method")
+		return nil, errCHCMAtLeastOne
 	}
+
 	m.CompressionMethods = append([]uint8(nil), cm...)
 	b = rest
 
@@ -128,10 +158,12 @@ func parseClientHello(b []byte) (*ClientHello, error) {
 		if err != nil {
 			return nil, fmt.Errorf("handshake: ClientHello extensions: %w", err)
 		}
+
 		ext, err := parseExtensions(extList)
 		if err != nil {
 			return nil, err
 		}
+
 		m.ServerName = ext.ServerName
 		m.SupportedGroups = ext.SupportedGroups
 		m.ECPointFormats = ext.ECPointFormats
@@ -190,32 +222,39 @@ func parseServerHello(b []byte) (*ServerHello, error) {
 	if err != nil {
 		return nil, fmt.Errorf("handshake: ServerHello version: %w", err)
 	}
+
 	m.Version = v
 	b = rest
 
-	rawRandom, rest, err := readBytes(b, 32)
+	rawRandom, rest, err := readBytes(b, tlsRandomLen)
 	if err != nil {
 		return nil, fmt.Errorf("handshake: ServerHello random: %w", err)
 	}
+
 	copy(m.Random[:], rawRandom)
+
 	b = rest
 
 	sid, rest, err := readLenPrefixed8(b)
 	if err != nil {
 		return nil, fmt.Errorf("handshake: ServerHello session_id: %w", err)
 	}
-	if len(sid) > 32 {
-		return nil, fmt.Errorf("handshake: ServerHello session_id length %d exceeds 32", len(sid))
+
+	if len(sid) > maxSessionIDLen {
+		return nil, fmt.Errorf("%w: %d", errSHSessionIDTooLong, len(sid))
 	}
+
 	if len(sid) > 0 {
 		m.SessionID = append([]byte(nil), sid...)
 	}
+
 	b = rest
 
 	cs, rest, err := readUint16(b)
 	if err != nil {
 		return nil, fmt.Errorf("handshake: ServerHello cipher_suite: %w", err)
 	}
+
 	m.CipherSuite = cs
 	b = rest
 
@@ -223,6 +262,7 @@ func parseServerHello(b []byte) (*ServerHello, error) {
 	if err != nil {
 		return nil, fmt.Errorf("handshake: ServerHello compression_method: %w", err)
 	}
+
 	m.CompressionMethod = cm
 	b = rest
 
@@ -231,10 +271,12 @@ func parseServerHello(b []byte) (*ServerHello, error) {
 		if err != nil {
 			return nil, fmt.Errorf("handshake: ServerHello extensions: %w", err)
 		}
+
 		ext, err := parseExtensions(extList)
 		if err != nil {
 			return nil, err
 		}
+
 		m.ExtendedMasterSecret = ext.ExtendedMasterSecret
 		m.RenegotiationInfo = ext.RenegotiationInfo
 	}
@@ -262,15 +304,18 @@ func (m *Certificate) Marshal() []byte {
 	// Compute total inner length first.
 	innerLen := 0
 	for _, c := range m.RawCerts {
-		innerLen += 3 + len(c) // uint24 len + cert bytes
+		innerLen += certEntryOverhead + len(c) // uint24 len + cert bytes.
 	}
 
-	out := make([]byte, 0, 3+innerLen)
+	out := make([]byte, 0, certListOverhead+innerLen)
+
 	out = appendUint24(out, uint32(innerLen))
+
 	for _, c := range m.RawCerts {
 		out = appendUint24(out, uint32(len(c)))
 		out = append(out, c...)
 	}
+
 	return out
 }
 
@@ -289,9 +334,11 @@ func parseCertificate(b []byte) (*Certificate, error) {
 		if err != nil {
 			return nil, fmt.Errorf("handshake: Certificate entry: %w", err)
 		}
+
 		if len(certBytes) == 0 {
-			return nil, fmt.Errorf("handshake: Certificate entry has zero length")
+			return nil, errCertEntryZeroLen
 		}
+
 		m.RawCerts = append(m.RawCerts, append([]byte(nil), certBytes...))
 		listBytes = rest
 	}
@@ -312,8 +359,8 @@ func (m *ServerKeyExchange) Marshal() []byte {
 	return append([]byte(nil), m.Body...)
 }
 
-func parseServerKeyExchange(b []byte) (*ServerKeyExchange, error) {
-	return &ServerKeyExchange{Body: append([]byte(nil), b...)}, nil
+func parseServerKeyExchange(b []byte) *ServerKeyExchange {
+	return &ServerKeyExchange{Body: append([]byte(nil), b...)}
 }
 
 // ServerHelloDone is the TLS 1.2 ServerHelloDone message (RFC 5246 §7.4.5).
@@ -325,8 +372,9 @@ func (m *ServerHelloDone) Marshal() []byte { return nil }
 
 func parseServerHelloDone(b []byte) (*ServerHelloDone, error) {
 	if len(b) != 0 {
-		return nil, fmt.Errorf("handshake: ServerHelloDone body must be empty, got %d bytes", len(b))
+		return nil, fmt.Errorf("%w, got %d bytes", errSHDNonEmptyBody, len(b))
 	}
+
 	return &ServerHelloDone{}, nil
 }
 
@@ -358,6 +406,7 @@ func parseCertificateRequest(b []byte) (*CertificateRequest, error) {
 	if err != nil {
 		return nil, fmt.Errorf("handshake: CertificateRequest certificate_types: %w", err)
 	}
+
 	m.CertificateTypes = append([]uint8(nil), typesBytes...)
 	b = rest
 
@@ -366,16 +415,19 @@ func parseCertificateRequest(b []byte) (*CertificateRequest, error) {
 	if err != nil {
 		return nil, fmt.Errorf("handshake: CertificateRequest supported_signature_algorithms: %w", err)
 	}
+
 	if len(sigAlgsBytes)%2 != 0 {
-		return nil, fmt.Errorf("handshake: CertificateRequest supported_signature_algorithms has odd byte count %d", len(sigAlgsBytes))
+		return nil, fmt.Errorf("%w: %d", errCRSAOddByteCount, len(sigAlgsBytes))
 	}
-	m.SupportedSignatureAlgs = make([]SigAndHash, len(sigAlgsBytes)/2)
+
+	m.SupportedSignatureAlgs = make([]SigAndHash, len(sigAlgsBytes)/pairSize)
 	for i := range m.SupportedSignatureAlgs {
 		m.SupportedSignatureAlgs[i] = SigAndHash{
-			Hash: sigAlgsBytes[2*i],
-			Sig:  sigAlgsBytes[2*i+1],
+			Hash: sigAlgsBytes[pairSize*i],
+			Sig:  sigAlgsBytes[pairSize*i+1],
 		}
 	}
+
 	b = rest
 
 	// certificate_authorities: uint16 byte-length prefix + list of {uint16 len, DER}.
@@ -383,11 +435,13 @@ func parseCertificateRequest(b []byte) (*CertificateRequest, error) {
 	if err != nil {
 		return nil, fmt.Errorf("handshake: CertificateRequest certificate_authorities: %w", err)
 	}
+
 	for len(casBytes) > 0 {
 		dn, rest, err := readLenPrefixed16(casBytes)
 		if err != nil {
 			return nil, fmt.Errorf("handshake: CertificateRequest certificate_authorities entry: %w", err)
 		}
+
 		m.CertificateAuthorities = append(m.CertificateAuthorities, append([]byte(nil), dn...))
 		casBytes = rest
 	}
@@ -407,8 +461,8 @@ func (m *ClientKeyExchange) Marshal() []byte {
 	return append([]byte(nil), m.Body...)
 }
 
-func parseClientKeyExchange(b []byte) (*ClientKeyExchange, error) {
-	return &ClientKeyExchange{Body: append([]byte(nil), b...)}, nil
+func parseClientKeyExchange(b []byte) *ClientKeyExchange {
+	return &ClientKeyExchange{Body: append([]byte(nil), b...)}
 }
 
 // CertificateVerify is the TLS 1.2 CertificateVerify message (RFC 5246 §7.4.8).
@@ -422,9 +476,11 @@ func (m *CertificateVerify) Type() Type { return TypeCertificateVerify }
 
 func (m *CertificateVerify) Marshal() []byte {
 	var out []byte
+
 	out = appendUint8(out, m.Algorithm.Hash)
 	out = appendUint8(out, m.Algorithm.Sig)
 	out = appendLenPrefixed16(out, m.Signature)
+
 	return out
 }
 
@@ -435,6 +491,7 @@ func parseCertificateVerify(b []byte) (*CertificateVerify, error) {
 	if err != nil {
 		return nil, fmt.Errorf("handshake: CertificateVerify hash: %w", err)
 	}
+
 	m.Algorithm.Hash = hashByte
 	b = rest
 
@@ -442,6 +499,7 @@ func parseCertificateVerify(b []byte) (*CertificateVerify, error) {
 	if err != nil {
 		return nil, fmt.Errorf("handshake: CertificateVerify sig: %w", err)
 	}
+
 	m.Algorithm.Sig = sigByte
 	b = rest
 
@@ -449,6 +507,7 @@ func parseCertificateVerify(b []byte) (*CertificateVerify, error) {
 	if err != nil {
 		return nil, fmt.Errorf("handshake: CertificateVerify signature: %w", err)
 	}
+
 	m.Signature = append([]byte(nil), sig...)
 
 	return &m, nil
@@ -467,12 +526,14 @@ func (m *Finished) Type() Type { return TypeFinished }
 func (m *Finished) Marshal() []byte {
 	out := make([]byte, len(m.VerifyData))
 	copy(out, m.VerifyData)
+
 	return out
 }
 
 func parseFinished(b []byte) (*Finished, error) {
 	if len(b) != 12 && len(b) != 32 {
-		return nil, fmt.Errorf("handshake: Finished: verify_data length must be 12 or 32, have %d", len(b))
+		return nil, fmt.Errorf("%w, have %d", errFinishedVerifyLen, len(b))
 	}
+
 	return &Finished{VerifyData: append([]byte(nil), b...)}, nil
 }

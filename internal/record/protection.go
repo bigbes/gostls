@@ -9,6 +9,20 @@ import (
 	"hash"
 )
 
+// macADLen is the length of the MAC additional data:
+// seq_num (8) || type (1) || version (2) || length (2) = 13.
+const macADLen = 13
+
+// aeadSaltLen is the length of the implicit IV salt for AEAD (GCM) suites.
+const aeadSaltLen = 4
+
+// aeadNonceLen is the total GCM nonce length: salt (4) || explicit (8) = 12.
+const aeadNonceLen = 12
+
+// aeadExplicitNonceLen is the wire length of the explicit nonce prepended to
+// each AEAD-encrypted record fragment.
+const aeadExplicitNonceLen = 8
+
 // Protector handles the Seal/Open operations for a TLS record fragment.
 //
 // Design choice: Seal and Open operate on fragment bytes only. The Layer
@@ -28,7 +42,7 @@ type Protector interface {
 	Open(seq uint64, hdr, fragment []byte) ([]byte, error)
 }
 
-// ---- nullProtector ---------------------------------------------------------
+// ---- nullProtector ---------------------------------------------------------.
 
 // nullProtector passes bytes through unchanged. Used before ChangeCipherSpec.
 type nullProtector struct{}
@@ -36,16 +50,18 @@ type nullProtector struct{}
 func (nullProtector) Seal(_ uint64, _, plain []byte) ([]byte, error) {
 	out := make([]byte, len(plain))
 	copy(out, plain)
+
 	return out, nil
 }
 
 func (nullProtector) Open(_ uint64, _, fragment []byte) ([]byte, error) {
 	out := make([]byte, len(fragment))
 	copy(out, fragment)
+
 	return out, nil
 }
 
-// ---- cbcHMACProtector ------------------------------------------------------
+// ---- cbcHMACProtector ------------------------------------------------------.
 
 // NewCipherFunc is the constructor type for a block cipher (e.g. aes.NewCipher).
 type NewCipherFunc func(key []byte) (cipher.Block, error)
@@ -72,6 +88,7 @@ func NewCBCHMACProtector(newCipher NewCipherFunc, newHash NewHashFunc, encKey, m
 	if err != nil {
 		return nil, err
 	}
+
 	h := hmac.New(newHash, macKey)
 	p := &cbcHMACProtector{
 		newCipher: newCipher,
@@ -83,6 +100,7 @@ func NewCBCHMACProtector(newCipher NewCipherFunc, newHash NewHashFunc, encKey, m
 	}
 	copy(p.encKey, encKey)
 	copy(p.macKey, macKey)
+
 	return p, nil
 }
 
@@ -90,21 +108,13 @@ func NewCBCHMACProtector(newCipher NewCipherFunc, newHash NewHashFunc, encKey, m
 // seq_num (8) || type (1) || version (2) || length (2).
 // length is plaintext fragment length.
 func macAdditionalData(seq uint64, hdr []byte, plainLen int) []byte {
-	ad := make([]byte, 13)
+	ad := make([]byte, macADLen)
 	binary.BigEndian.PutUint64(ad[0:8], seq)
 	// hdr[0] = type, hdr[1:3] = version.
 	copy(ad[8:11], hdr[0:3])
 	binary.BigEndian.PutUint16(ad[11:13], uint16(plainLen))
-	return ad
-}
 
-// computeMAC computes HMAC over the additional data concatenated with the fragment.
-func (p *cbcHMACProtector) computeMAC(seq uint64, hdr, fragment []byte) []byte {
-	h := hmac.New(p.newHash, p.macKey)
-	ad := macAdditionalData(seq, hdr, len(fragment))
-	h.Write(ad)
-	h.Write(fragment)
-	return h.Sum(nil)
+	return ad
 }
 
 // Seal implements Protector. Returns IV || Encrypt(plain || mac || padding).
@@ -117,14 +127,17 @@ func (p *cbcHMACProtector) Seal(seq uint64, hdr, plain []byte) ([]byte, error) {
 	// the same value (RFC 5246 §6.2.3.2).
 	contentLen := len(plain) + p.macSize
 	padLen := p.blockSize - (contentLen+1)%p.blockSize
+
 	if padLen < 0 {
 		padLen += p.blockSize
 	}
+
 	paddingByte := byte(padLen)
 
 	buf := make([]byte, contentLen+padLen+1)
 	copy(buf, plain)
 	copy(buf[len(plain):], mac)
+
 	for i := contentLen; i < len(buf); i++ {
 		buf[i] = paddingByte
 	}
@@ -145,6 +158,7 @@ func (p *cbcHMACProtector) Seal(seq uint64, hdr, plain []byte) ([]byte, error) {
 	out := make([]byte, p.blockSize+len(buf))
 	copy(out, iv)
 	copy(out[p.blockSize:], buf)
+
 	return out, nil
 }
 
@@ -158,6 +172,7 @@ func (p *cbcHMACProtector) Open(seq uint64, hdr, fragment []byte) ([]byte, error
 	if len(fragment) < p.blockSize+p.macSize+1 {
 		return nil, NewFatalAlertError(AlertBadRecordMAC)
 	}
+
 	if len(fragment)%p.blockSize != 0 {
 		return nil, NewFatalAlertError(AlertBadRecordMAC)
 	}
@@ -188,17 +203,22 @@ func (p *cbcHMACProtector) Open(seq uint64, hdr, fragment []byte) ([]byte, error
 	if paddingStart < 0 {
 		paddingOK = 0
 	}
+
 	for i := range plain {
 		inPadding := subtle.ConstantTimeLessOrEq(paddingStart, i)
 		match := subtle.ConstantTimeByteEq(plain[i], plain[len(plain)-1])
+
 		paddingOK &= (1 - inPadding) | (inPadding & match)
 	}
 
 	// Determine MAC boundaries. On bad padding or underflow we use nil/zero
 	// slices so computeMAC still runs (timing uniformity) but produces a
 	// different result than any valid MAC.
-	var msgPlain []byte
-	var gotMAC []byte
+	var (
+		msgPlain []byte
+		gotMAC   []byte
+	)
+
 	if paddingOK == 1 && paddingStart-p.macSize >= 0 {
 		msgPlain = plain[:paddingStart-p.macSize]
 		gotMAC = plain[paddingStart-p.macSize : paddingStart]
@@ -216,10 +236,21 @@ func (p *cbcHMACProtector) Open(seq uint64, hdr, fragment []byte) ([]byte, error
 
 	out := make([]byte, len(msgPlain))
 	copy(out, msgPlain)
+
 	return out, nil
 }
 
-// ---- aeadProtector ---------------------------------------------------------
+// computeMAC computes HMAC over the additional data concatenated with the fragment.
+func (p *cbcHMACProtector) computeMAC(seq uint64, hdr, fragment []byte) []byte {
+	h := hmac.New(p.newHash, p.macKey)
+	ad := macAdditionalData(seq, hdr, len(fragment))
+	h.Write(ad)
+	h.Write(fragment)
+
+	return h.Sum(nil)
+}
+
+// ---- aeadProtector ---------------------------------------------------------.
 
 // aeadProtector implements TLS 1.2 AEAD (RFC 5288, RFC 5246 §6.2.3.3).
 // Nonce: 4-byte implicit salt (from key expansion) || 8-byte explicit nonce
@@ -227,51 +258,48 @@ func (p *cbcHMACProtector) Open(seq uint64, hdr, fragment []byte) ([]byte, error
 // AD: seq_num (8) || type (1) || version (2) || plaintext_length (2).
 type aeadProtector struct {
 	aead cipher.AEAD
-	salt []byte // 4-byte implicit IV salt
+	salt []byte // 4-byte implicit IV salt.
 }
 
 // NewAEADProtector creates an AES-128-GCM protector.
 // key must be 16 bytes (AES-128). salt must be exactly 4 bytes.
 func NewAEADProtector(key, salt []byte) (Protector, error) {
-	if len(salt) != 4 {
+	if len(salt) != aeadSaltLen {
 		return nil, fatalRecordError("AEAD salt must be exactly 4 bytes")
 	}
+
 	block, err := newAESCipher(key)
 	if err != nil {
 		return nil, err
 	}
+
 	aead, err := cipher.NewGCM(block)
 	if err != nil {
 		return nil, err
 	}
+
 	p := &aeadProtector{
 		aead: aead,
-		salt: make([]byte, 4),
+		salt: make([]byte, aeadSaltLen),
 	}
 	copy(p.salt, salt)
-	return p, nil
-}
 
-// buildNonce constructs the 12-byte GCM nonce: salt (4) || explicit (8).
-func (p *aeadProtector) buildNonce(explicit []byte) []byte {
-	nonce := make([]byte, 12)
-	copy(nonce[:4], p.salt)
-	copy(nonce[4:], explicit)
-	return nonce
+	return p, nil
 }
 
 // buildAD constructs the AEAD additional data.
 func buildAD(seq uint64, hdr []byte, plainLen int) []byte {
-	ad := make([]byte, 13)
+	ad := make([]byte, macADLen)
 	binary.BigEndian.PutUint64(ad[0:8], seq)
-	copy(ad[8:11], hdr[0:3]) // type + version
+	copy(ad[8:11], hdr[0:3]) // type + version.
 	binary.BigEndian.PutUint16(ad[11:13], uint16(plainLen))
+
 	return ad
 }
 
 // Seal implements Protector. Returns explicitNonce (8) || ciphertext+tag.
 func (p *aeadProtector) Seal(seq uint64, hdr, plain []byte) ([]byte, error) {
-	explicitNonce := make([]byte, 8)
+	explicitNonce := make([]byte, aeadExplicitNonceLen)
 	binary.BigEndian.PutUint64(explicitNonce, seq)
 
 	nonce := p.buildNonce(explicitNonce)
@@ -279,21 +307,22 @@ func (p *aeadProtector) Seal(seq uint64, hdr, plain []byte) ([]byte, error) {
 
 	ciphertext := p.aead.Seal(nil, nonce, plain, ad)
 
-	out := make([]byte, 8+len(ciphertext))
-	copy(out[:8], explicitNonce)
-	copy(out[8:], ciphertext)
+	out := make([]byte, aeadExplicitNonceLen+len(ciphertext))
+	copy(out[:aeadExplicitNonceLen], explicitNonce)
+	copy(out[aeadExplicitNonceLen:], ciphertext)
+
 	return out, nil
 }
 
 // Open implements Protector. Input is explicitNonce (8) || ciphertext+tag.
 func (p *aeadProtector) Open(seq uint64, hdr, fragment []byte) ([]byte, error) {
 	tagSize := p.aead.Overhead()
-	if len(fragment) < 8+tagSize {
+	if len(fragment) < aeadExplicitNonceLen+tagSize {
 		return nil, NewFatalAlertError(AlertBadRecordMAC)
 	}
 
-	explicitNonce := fragment[:8]
-	ciphertext := fragment[8:]
+	explicitNonce := fragment[:aeadExplicitNonceLen]
+	ciphertext := fragment[aeadExplicitNonceLen:]
 	plainLen := len(ciphertext) - tagSize
 
 	nonce := p.buildNonce(explicitNonce)
@@ -303,5 +332,15 @@ func (p *aeadProtector) Open(seq uint64, hdr, fragment []byte) ([]byte, error) {
 	if err != nil {
 		return nil, NewFatalAlertError(AlertBadRecordMAC)
 	}
+
 	return plain, nil
+}
+
+// buildNonce constructs the 12-byte GCM nonce: salt (4) || explicit (8).
+func (p *aeadProtector) buildNonce(explicit []byte) []byte {
+	nonce := make([]byte, aeadNonceLen)
+	copy(nonce[:aeadSaltLen], p.salt)
+	copy(nonce[aeadSaltLen:], explicit)
+
+	return nonce
 }

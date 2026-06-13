@@ -4,10 +4,7 @@ package handshake
 // Sum(factory) computes the transcript hash on demand using the
 // caller-supplied factory. No internal hash tracking; no Collapse.
 
-import (
-	"errors"
-	"hash"
-)
+import "hash"
 
 // Transcript accumulates the bytes of handshake messages for use in the PRF
 // and CertificateVerify computation (RFC 5246 §7.4.9).
@@ -45,9 +42,11 @@ func (t *Transcript) Write(msg []byte) {
 // errors.New("handshake: transcript: nil hash factory").
 func (t *Transcript) Sum(factory func() hash.Hash) ([]byte, error) {
 	if factory == nil {
-		return nil, errors.New("handshake: transcript: nil hash factory")
+		return nil, errNilHashFactory
 	}
+
 	h := factory()
 	h.Write(t.buf)
+
 	return h.Sum(nil), nil
 }

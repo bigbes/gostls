@@ -1,3 +1,4 @@
+//nolint:testpackage // white-box: accesses unexported newConn and handshakeOnce fields
 package gostls
 
 import (
@@ -16,12 +17,15 @@ import (
 // blocked in layer.ReadRecord, starving any concurrent Write. The current
 // split-lock shape (inMu for Read, outMu for Write) lets the writer proceed.
 func TestConn_ConcurrentReadWrite(t *testing.T) {
+	t.Parallel()
+
 	clientEnd, serverEnd := net.Pipe()
 
 	// Build a *Conn on the client end. newConn initialises the record layer.
 	c := newConn(clientEnd, &Config{})
 
-	// Mark the handshake done without running a real handshake — Once is consumed with a no-op func; handshakeErr stays nil.
+	// Mark the handshake done without running a real handshake.
+	// Once is consumed with a no-op func; handshakeErr stays nil.
 	c.handshakeOnce.Do(func() {})
 
 	// Drainer: consume everything the client writes so that the pipe's write
@@ -31,6 +35,7 @@ func TestConn_ConcurrentReadWrite(t *testing.T) {
 	drainerDone := make(chan struct{})
 	go func() {
 		defer close(drainerDone)
+
 		buf := make([]byte, 4096)
 		for {
 			_, err := serverEnd.Read(buf)
@@ -46,6 +51,7 @@ func TestConn_ConcurrentReadWrite(t *testing.T) {
 	go func() {
 		buf := make([]byte, 16)
 		_, err := c.Read(buf)
+
 		readDone <- err
 	}()
 
@@ -56,6 +62,7 @@ func TestConn_ConcurrentReadWrite(t *testing.T) {
 	// With the split inMu/outMu shape this returns immediately; under a
 	// shared single lock held by Read, it would deadlock.
 	writeDone := make(chan error, 1)
+
 	go func() {
 		_, err := c.Write([]byte("hello"))
 		writeDone <- err
@@ -74,9 +81,11 @@ func TestConn_ConcurrentReadWrite(t *testing.T) {
 	// Cleanup: close the client end so the blocked reader's ReadRecord returns,
 	// then drain readDone to avoid leaking the goroutine.
 	_ = clientEnd.Close()
+
 	<-readDone
 
 	// Close the server end to unblock the drainer goroutine.
 	_ = serverEnd.Close()
+
 	<-drainerDone
 }

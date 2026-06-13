@@ -20,9 +20,23 @@ const (
 // tlsVersion is the only version this layer accepts on the wire.
 const tlsVersion = uint16(0x0303)
 
+// tlsMaxPlaintextLen is the maximum plaintext fragment length (RFC 5246 §6.2.1):
+// 2^14 bytes.
+const tlsMaxPlaintextLen = 1 << 14
+
+// tlsMaxCiphertextOverhead is the maximum overhead (in bytes) above plaintext
+// length allowed for a TLSCiphertext record (RFC 5246 §6.2.2).
+const tlsMaxCiphertextOverhead = 2048
+
+// tlsVersionHi is the high byte of tlsVersion (TLS 1.2 major version).
+const tlsVersionHi = byte(tlsVersion >> 8)
+
+// tlsVersionLo is the low byte of tlsVersion (TLS 1.2 minor version).
+const tlsVersionLo = byte(tlsVersion & 0xFF)
+
 // maxFragmentLen is the maximum allowed fragment length (RFC 5246 §6.2.2).
 // For TLSCiphertext (encrypted): 2^14 + 2048.
-const maxFragmentLen = (1 << 14) + 2048
+const maxFragmentLen = tlsMaxPlaintextLen + tlsMaxCiphertextOverhead
 
 // recordHeaderLen is the fixed size of a TLS record header.
 const recordHeaderLen = 5
@@ -36,6 +50,7 @@ func isKnownContentType(ct uint8) bool {
 		ContentTypeApplicationData:
 		return true
 	}
+
 	return false
 }
 
@@ -72,6 +87,7 @@ func NewLayer(rw io.ReadWriter) *Layer {
 // both send and receive directions. Used in tests to verify overflow behaviour.
 func NewLayerWithSeq(rw io.ReadWriter, initialSeq uint64) *Layer {
 	null := nullProtector{}
+
 	return &Layer{
 		rw:       rw,
 		sendSeq:  initialSeq,
@@ -88,6 +104,7 @@ func (l *Layer) ChangeCipherSpec(send, recv Protector) {
 		l.sendProt = send
 		l.sendSeq = 0
 	}
+
 	if recv != nil {
 		l.recvProt = recv
 		l.recvSeq = 0
@@ -100,9 +117,11 @@ func (l *Layer) WriteRecord(contentType uint8, payload []byte) error {
 	if !isKnownContentType(contentType) {
 		return fatalRecordError(fmt.Sprintf("unknown content type 0x%02x", contentType))
 	}
-	if len(payload) > (1 << 14) {
+
+	if len(payload) > tlsMaxPlaintextLen {
 		return fatalRecordError("plaintext payload exceeds 2^14 bytes")
 	}
+
 	if l.sendSeq == math.MaxUint64 {
 		return fatalRecordError("sequence number overflow")
 	}
@@ -110,9 +129,9 @@ func (l *Layer) WriteRecord(contentType uint8, payload []byte) error {
 	// Build the 5-byte header template (length will be updated after Seal).
 	hdr := [recordHeaderLen]byte{
 		contentType,
-		byte(tlsVersion >> 8),
-		byte(tlsVersion & 0xFF),
-		0, 0, // placeholder length
+		tlsVersionHi,
+		tlsVersionLo,
+		0, 0, // placeholder length.
 	}
 
 	dumpPlaintext("send", l.sendSeq, contentType, tlsVersion, payload)
@@ -124,14 +143,17 @@ func (l *Layer) WriteRecord(contentType uint8, payload []byte) error {
 
 	// Write the actual 5-byte header with corrected length.
 	binary.BigEndian.PutUint16(hdr[3:5], uint16(len(fragment)))
+
 	if _, err := l.rw.Write(hdr[:]); err != nil {
 		return err
 	}
+
 	if _, err := l.rw.Write(fragment); err != nil {
 		return err
 	}
 
 	l.sendSeq++
+
 	return nil
 }
 
@@ -145,6 +167,7 @@ func (l *Layer) ReadRecord() (contentType uint8, payload []byte, err error) {
 
 	// Read 5-byte header.
 	var hdr [recordHeaderLen]byte
+
 	if _, err := io.ReadFull(l.rw, hdr[:]); err != nil {
 		return 0, nil, err
 	}
@@ -156,9 +179,11 @@ func (l *Layer) ReadRecord() (contentType uint8, payload []byte, err error) {
 	if !isKnownContentType(ct) {
 		return 0, nil, NewFatalAlertError(AlertIllegalParameter)
 	}
+
 	if ver != tlsVersion {
 		return 0, nil, NewFatalAlertError(AlertProtocolVersion)
 	}
+
 	if int(length) > maxFragmentLen {
 		return 0, nil, NewFatalAlertError(AlertRecordOverflow)
 	}
@@ -176,5 +201,6 @@ func (l *Layer) ReadRecord() (contentType uint8, payload []byte, err error) {
 	dumpPlaintext("recv", l.recvSeq, ct, ver, plain)
 
 	l.recvSeq++
+
 	return ct, plain, nil
 }

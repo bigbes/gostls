@@ -38,9 +38,16 @@ const (
 	gostBlockSize = gost.GOST28147BlockSize // 8
 	gostMACSize   = 4
 	gostKeySize   = gost.GOST28147KeySize // 32
+
+	// Bit-shift constants for little-endian 32-bit word packing in nextGamma.
+	// GOST 28147-89 CNT counter words are encoded in little-endian byte order
+	// (RFC 5830 §6.2, gost-engine gost_cnt_next).
+	shift8  = 8
+	shift16 = 16
+	shift24 = 24
 )
 
-// ── CNT (counter stream) mode ────────────────────────────────────────────────
+// ── CNT (counter stream) mode ────────────────────────────────────────────────.
 
 type gostCNT struct {
 	cipher *gost.GOST28147Cipher
@@ -54,7 +61,27 @@ type gostCNT struct {
 func newGostCNT(cipher *gost.GOST28147Cipher, sbox *gost.Sbox, iv []byte) *gostCNT {
 	s := &gostCNT{cipher: cipher, sbox: sbox}
 	copy(s.iv[:], iv)
+
 	return s
+}
+
+func (s *gostCNT) XORKeyStream(dst, src []byte) {
+	for i := 0; i < len(src); {
+		if s.num == 0 {
+			s.nextGamma()
+		}
+
+		for s.num < gostBlockSize && i < len(src) {
+			dst[i] = src[i] ^ s.buf[s.num]
+			s.num++
+
+			i++
+		}
+
+		if s.num == gostBlockSize {
+			s.num = 0
+		}
+	}
 }
 
 // meshKey performs CryptoPro key meshing with IV update, matching
@@ -64,15 +91,20 @@ func newGostCNT(cipher *gost.GOST28147Cipher, sbox *gost.Sbox, iv []byte) *gostC
 // re-encrypted under the new key.
 func (s *gostCNT) meshKey() {
 	var newKey [gostKeySize]byte
-	for j := 0; j < 4; j++ {
+
+	for j := range 4 {
 		s.cipher.Decrypt(
 			newKey[j*gostBlockSize:(j+1)*gostBlockSize],
 			cryptoProKeyMeshingKey[j*gostBlockSize:(j+1)*gostBlockSize],
 		)
 	}
+
 	s.cipher = gost.NewGOST28147Cipher(newKey[:], s.sbox)
+
 	var newIV [gostBlockSize]byte
+
 	s.cipher.Encrypt(newIV[:], s.iv[:])
+
 	s.iv = newIV
 }
 
@@ -84,50 +116,44 @@ func (s *gostCNT) nextGamma() {
 	if s.count == meshThreshold {
 		s.meshKey()
 	}
+
 	var buf1 [gostBlockSize]byte
+
 	if s.count == 0 {
 		s.cipher.Encrypt(buf1[:], s.iv[:])
 	} else {
 		copy(buf1[:], s.iv[:])
 	}
-	g := uint32(buf1[0]) | uint32(buf1[1])<<8 | uint32(buf1[2])<<16 | uint32(buf1[3])<<24
+
+	g := uint32(buf1[0]) | uint32(buf1[1])<<shift8 | uint32(buf1[2])<<shift16 | uint32(buf1[3])<<shift24
+
 	g += 0x01010101
+
 	buf1[0] = byte(g)
-	buf1[1] = byte(g >> 8)
-	buf1[2] = byte(g >> 16)
-	buf1[3] = byte(g >> 24)
-	g2 := uint32(buf1[4]) | uint32(buf1[5])<<8 | uint32(buf1[6])<<16 | uint32(buf1[7])<<24
+	buf1[1] = byte(g >> shift8)
+	buf1[2] = byte(g >> shift16)
+	buf1[3] = byte(g >> shift24)
+
+	g2 := uint32(buf1[4]) | uint32(buf1[5])<<shift8 | uint32(buf1[6])<<shift16 | uint32(buf1[7])<<shift24
 	g2old := g2
+
 	g2 += 0x01010104
+
 	if g2old > g2 {
 		g2++
 	}
+
 	buf1[4] = byte(g2)
-	buf1[5] = byte(g2 >> 8)
-	buf1[6] = byte(g2 >> 16)
-	buf1[7] = byte(g2 >> 24)
+	buf1[5] = byte(g2 >> shift8)
+	buf1[6] = byte(g2 >> shift16)
+	buf1[7] = byte(g2 >> shift24)
 	copy(s.iv[:], buf1[:])
 	s.cipher.Encrypt(s.buf[:], buf1[:])
+
 	s.count = s.count%meshThreshold + gostBlockSize
 }
 
-func (s *gostCNT) XORKeyStream(dst, src []byte) {
-	for i := 0; i < len(src); {
-		if s.num == 0 {
-			s.nextGamma()
-		}
-		for s.num < gostBlockSize && i < len(src) {
-			dst[i] = src[i] ^ s.buf[s.num]
-			s.num++
-			i++
-		}
-		if s.num == gostBlockSize {
-			s.num = 0
-		}
-	}
-}
-
-// ── IMIT (CBC-MAC) with persistent state ─────────────────────────────────────
+// ── IMIT (CBC-MAC) with persistent state ─────────────────────────────────────.
 
 // meshThreshold is the number of bytes processed before CryptoPro key
 // meshing triggers. Matches gost-engine's mac_block_mesh assertion:
@@ -155,53 +181,14 @@ var cryptoProKeyMeshingKey = [gostKeySize]byte{
 type gostIMIT struct {
 	cipher *gost.GOST28147Cipher
 	sbox   *gost.Sbox
-	prev   [gostBlockSize]byte // CBC-MAC chaining state (persistent)
-	buf    [gostBlockSize]byte // partial block buffer
-	bufLen int                 // bytes pending in buf
-	count  int                 // bytes processed in full blocks (mod-1024 + 8 per block)
+	prev   [gostBlockSize]byte // CBC-MAC chaining state (persistent).
+	buf    [gostBlockSize]byte // partial block buffer.
+	bufLen int                 // bytes pending in buf.
+	count  int                 // bytes processed in full blocks (mod-1024 + 8 per block).
 }
 
 func newGostIMIT(cipher *gost.GOST28147Cipher, sbox *gost.Sbox) *gostIMIT {
 	return &gostIMIT{cipher: cipher, sbox: sbox}
-}
-
-// macBlockEncrypt performs the 16-round SeqMAC encrypt of an 8-byte block via
-// the cipher's SeqMACBlock primitive (the 16-round schedule, distinct from the
-// 32-round Encrypt).
-func (m *gostIMIT) macBlockEncrypt(cipher *gost.GOST28147Cipher, block [gostBlockSize]byte) [gostBlockSize]byte {
-	result := cipher.SeqMACBlock(block[:])
-	var out [gostBlockSize]byte
-	copy(out[:], result)
-	return out
-}
-
-// meshKey performs CryptoPro key meshing: ECB-decrypt the meshing constant
-// with the current cipher, producing a new 32-byte key. Returns a new Cipher.
-// Mirrors gost-engine's cryptopro_key_meshing (gost89.c:750-766) with iv=NULL.
-func (m *gostIMIT) meshKey() {
-	var newKey [gostKeySize]byte
-	for j := 0; j < 4; j++ {
-		m.cipher.Decrypt(
-			newKey[j*gostBlockSize:(j+1)*gostBlockSize],
-			cryptoProKeyMeshingKey[j*gostBlockSize:(j+1)*gostBlockSize],
-		)
-	}
-	m.cipher = gost.NewGOST28147Cipher(newKey[:], m.sbox)
-}
-
-// processBlockMesh applies key meshing (when threshold is reached), then
-// XORs the 8-byte block with prev and 16-round-encrypts the result.
-// Mirrors gost-engine's mac_block_mesh (gost_crypt.c:1510-1524).
-func (m *gostIMIT) processBlockMesh(block []byte) {
-	if m.count == meshThreshold {
-		m.meshKey()
-	}
-	var xored [gostBlockSize]byte
-	for i := 0; i < gostBlockSize; i++ {
-		xored[i] = m.prev[i] ^ block[i]
-	}
-	m.prev = m.macBlockEncrypt(m.cipher, xored)
-	m.count = m.count%meshThreshold + gostBlockSize
 }
 
 // Write feeds data into the IMIT MAC. Mirrors gost-engine's gost_imit_update
@@ -216,26 +203,33 @@ func (m *gostIMIT) Write(data []byte) {
 		for m.bufLen < gostBlockSize && i < len(data) {
 			m.buf[m.bufLen] = data[i]
 			m.bufLen++
+
 			i++
 		}
+
 		if m.bufLen < gostBlockSize {
 			return
 		}
+
 		// bufLen == 8: only process if more data follows.
 		remaining := len(data) - i
 		if remaining > 0 {
 			m.processBlockMesh(m.buf[:])
+
 			m.bufLen = 0
 		} else {
 			// Defer this full block — it will be processed by next Write or Finalize.
 			return
 		}
 	}
+
 	// Process full blocks while more than 8 bytes remain (bytes > 8, not >=).
 	for len(data)-i > gostBlockSize {
 		m.processBlockMesh(data[i : i+gostBlockSize])
+
 		i += gostBlockSize
 	}
+
 	// Buffer trailing 1..8 bytes.
 	if i < len(data) {
 		m.bufLen = copy(m.buf[:], data[i:])
@@ -269,21 +263,27 @@ func (m *gostIMIT) Finalize() []byte {
 		// (would require the partial block to land exactly at 1024),
 		// but we handle it for correctness.
 		cipher := m.cipher
+
 		if count == meshThreshold {
 			// We can't mutate m.cipher, so derive the meshed key locally.
 			var newKey [gostKeySize]byte
-			for j := 0; j < 4; j++ {
+
+			for j := range 4 {
 				cipher.Decrypt(
 					newKey[j*gostBlockSize:(j+1)*gostBlockSize],
 					cryptoProKeyMeshingKey[j*gostBlockSize:(j+1)*gostBlockSize],
 				)
 			}
+
 			cipher = gost.NewGOST28147Cipher(newKey[:], m.sbox)
 		}
+
 		var xored [gostBlockSize]byte
-		for i := 0; i < gostBlockSize; i++ {
+
+		for i := range gostBlockSize {
 			xored[i] = prev[i] ^ block[i]
 		}
+
 		prev = m.macBlockEncrypt(cipher, xored)
 		count = count%meshThreshold + gostBlockSize
 	}
@@ -296,19 +296,71 @@ func (m *gostIMIT) Finalize() []byte {
 	// the zero block matches the engine for short inputs too.
 	if bufLen > 0 {
 		var last [gostBlockSize]byte
+
 		copy(last[:], buf[:bufLen])
 		processSnap(last[:])
 	}
+
 	if count == 0 && bufLen > 0 {
 		var zero [gostBlockSize]byte
+
 		processSnap(zero[:])
 	}
+
 	tag := make([]byte, gostMACSize)
 	copy(tag, prev[:gostMACSize])
+
 	return tag
 }
 
-// ── Protector ────────────────────────────────────────────────────────────────
+// macBlockEncrypt performs the 16-round SeqMAC encrypt of an 8-byte block via
+// the cipher's SeqMACBlock primitive (the 16-round schedule, distinct from the
+// 32-round Encrypt).
+func (m *gostIMIT) macBlockEncrypt(cipher *gost.GOST28147Cipher, block [gostBlockSize]byte) [gostBlockSize]byte {
+	result := cipher.SeqMACBlock(block[:])
+
+	var out [gostBlockSize]byte
+
+	copy(out[:], result)
+
+	return out
+}
+
+// meshKey performs CryptoPro key meshing: ECB-decrypt the meshing constant
+// with the current cipher, producing a new 32-byte key. Returns a new Cipher.
+// Mirrors gost-engine's cryptopro_key_meshing (gost89.c:750-766) with iv=NULL.
+func (m *gostIMIT) meshKey() {
+	var newKey [gostKeySize]byte
+
+	for j := range 4 {
+		m.cipher.Decrypt(
+			newKey[j*gostBlockSize:(j+1)*gostBlockSize],
+			cryptoProKeyMeshingKey[j*gostBlockSize:(j+1)*gostBlockSize],
+		)
+	}
+
+	m.cipher = gost.NewGOST28147Cipher(newKey[:], m.sbox)
+}
+
+// processBlockMesh applies key meshing (when threshold is reached), then
+// XORs the 8-byte block with prev and 16-round-encrypts the result.
+// Mirrors gost-engine's mac_block_mesh (gost_crypt.c:1510-1524).
+func (m *gostIMIT) processBlockMesh(block []byte) {
+	if m.count == meshThreshold {
+		m.meshKey()
+	}
+
+	var xored [gostBlockSize]byte
+
+	for i := range gostBlockSize {
+		xored[i] = m.prev[i] ^ block[i]
+	}
+
+	m.prev = m.macBlockEncrypt(m.cipher, xored)
+	m.count = m.count%meshThreshold + gostBlockSize
+}
+
+// ── Protector ────────────────────────────────────────────────────────────────.
 
 type gost28147Protector struct {
 	sbox   *gost.Sbox
@@ -319,17 +371,23 @@ type gost28147Protector struct {
 
 func NewGOST28147Protector(encKey, macKey, iv []byte, sbox *gost.Sbox) (Protector, error) {
 	if len(encKey) != gostKeySize {
-		return nil, fatalRecordError(fmt.Sprintf("GOST28147 enc key must be %d bytes, got %d", gostKeySize, len(encKey)))
+		return nil, fatalRecordError(fmt.Sprintf(
+			"GOST28147 enc key must be %d bytes, got %d", gostKeySize, len(encKey)))
 	}
+
 	if len(macKey) != gostKeySize {
-		return nil, fatalRecordError(fmt.Sprintf("GOST28147 mac key must be %d bytes, got %d", gostKeySize, len(macKey)))
+		return nil, fatalRecordError(fmt.Sprintf(
+			"GOST28147 mac key must be %d bytes, got %d", gostKeySize, len(macKey)))
 	}
+
 	if len(iv) != gostBlockSize {
-		return nil, fatalRecordError(fmt.Sprintf("GOST28147 iv must be %d bytes, got %d", gostBlockSize, len(iv)))
+		return nil, fatalRecordError(fmt.Sprintf(
+			"GOST28147 iv must be %d bytes, got %d", gostBlockSize, len(iv)))
 	}
 
 	ek := make([]byte, gostKeySize)
 	copy(ek, encKey)
+
 	mk := make([]byte, gostKeySize)
 	copy(mk, macKey)
 
@@ -347,22 +405,13 @@ func NewGOST28147Protector(encKey, macKey, iv []byte, sbox *gost.Sbox) (Protecto
 	}, nil
 }
 
-func (p *gost28147Protector) computeGOSTMAC(seq uint64, hdr, plain []byte) []byte {
-	var ad [13]byte
-	binary.BigEndian.PutUint64(ad[0:8], seq)
-	copy(ad[8:11], hdr[0:3])
-	binary.BigEndian.PutUint16(ad[11:13], uint16(len(plain)))
-	p.imit.Write(ad[:])
-	p.imit.Write(plain)
-	return p.imit.Finalize()
-}
-
 func (p *gost28147Protector) Seal(seq uint64, hdr, plain []byte) ([]byte, error) {
 	mac := p.computeGOSTMAC(seq, hdr, plain)
 	buf := make([]byte, len(plain)+gostMACSize)
 	copy(buf, plain)
 	copy(buf[len(plain):], mac)
 	p.cnt.XORKeyStream(buf, buf)
+
 	return buf, nil
 }
 
@@ -370,14 +419,30 @@ func (p *gost28147Protector) Open(seq uint64, hdr, fragment []byte) ([]byte, err
 	if len(fragment) < gostMACSize {
 		return nil, NewFatalAlertError(AlertBadRecordMAC)
 	}
+
 	buf := make([]byte, len(fragment))
 	p.cnt.XORKeyStream(buf, fragment)
+
 	plainEnd := len(buf) - gostMACSize
 	plain := buf[:plainEnd]
 	gotMAC := buf[plainEnd:]
 	expectedMAC := p.computeGOSTMAC(seq, hdr, plain)
+
 	if subtle.ConstantTimeCompare(gotMAC, expectedMAC) != 1 {
 		return nil, NewFatalAlertError(AlertBadRecordMAC)
 	}
+
 	return plain, nil
+}
+
+func (p *gost28147Protector) computeGOSTMAC(seq uint64, hdr, plain []byte) []byte {
+	var ad [macADLen]byte
+
+	binary.BigEndian.PutUint64(ad[0:8], seq)
+	copy(ad[8:11], hdr[0:3])
+	binary.BigEndian.PutUint16(ad[11:13], uint16(len(plain)))
+	p.imit.Write(ad[:])
+	p.imit.Write(plain)
+
+	return p.imit.Finalize()
 }

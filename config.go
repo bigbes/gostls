@@ -18,10 +18,29 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 
 	"github.com/bigbes/gostls/internal/handshake"
+)
+
+// Sentinel errors for static err113 compliance.
+var (
+	// errRootCAsMutuallyExclusive is returned when both RootCAs and RootCAPEMs are set.
+	errRootCAsMutuallyExclusive = errors.New(
+		"tls: Config.RootCAs and Config.RootCAPEMs are mutually exclusive; set only one",
+	)
+	// errRootCAPEMParseFailed is wrapped with the index to indicate a parse failure.
+	errRootCAPEMParseFailed = errors.New("tls: RootCAPEMs: failed to parse certificate")
+	// errRootCAPEMNoCerts is wrapped with the index to indicate no CERTIFICATE blocks.
+	errRootCAPEMNoCerts = errors.New("tls: RootCAPEMs: no CERTIFICATE blocks found")
+	// errCertUnsupportedKeyType is wrapped with cert index and key type.
+	errCertUnsupportedKeyType = errors.New(
+		"tls: Certificates: PrivateKey has unsupported type; want *rsa.PrivateKey or *ecdsa.PrivateKey",
+	)
+	// errCertEmptyRaw is wrapped with the cert index.
+	errCertEmptyRaw = errors.New("tls: Certificates: RawCertificate is empty")
 )
 
 // Certificate holds a certificate and its private key.
@@ -110,6 +129,7 @@ func (c *Config) rand() io.Reader {
 	if c != nil && c.Rand != nil {
 		return c.Rand
 	}
+
 	return rand.Reader
 }
 
@@ -124,16 +144,19 @@ func (c *Config) rand() io.Reader {
 // When c is nil, (nil, nil) is returned.
 func (c *Config) rootCAPool() (*x509.CertPool, error) {
 	if c == nil {
-		return nil, nil
+		return nil, nil //nolint:nilnil // nil pool means "use OS trust store", which is the intended zero value
 	}
+
 	if c.RootCAs != nil && len(c.RootCAPEMs) > 0 {
-		return nil, fmt.Errorf("tls: Config.RootCAs and Config.RootCAPEMs are mutually exclusive; set only one")
+		return nil, errRootCAsMutuallyExclusive
 	}
+
 	if c.RootCAs != nil {
 		return c.RootCAs, nil
 	}
+
 	if len(c.RootCAPEMs) == 0 {
-		return nil, nil
+		return nil, nil //nolint:nilnil // nil pool means "use OS trust store", which is the intended zero value
 	}
 
 	pool := x509.NewCertPool()
@@ -147,24 +170,31 @@ func (c *Config) rootCAPool() (*x509.CertPool, error) {
 			// no CERTIFICATE type". Decode to check.
 			hasCertBlock := false
 			rest := block
+
 			for {
 				var pemBlock *pem.Block
+
 				pemBlock, rest = pem.Decode(rest)
+
 				if pemBlock == nil {
 					break
 				}
+
 				if pemBlock.Type == "CERTIFICATE" {
 					hasCertBlock = true
 					break
 				}
 			}
+
 			if hasCertBlock {
 				// There was a CERTIFICATE block but it failed to parse.
-				return nil, fmt.Errorf("tls: RootCAPEMs[%d]: failed to parse certificate", i)
+				return nil, fmt.Errorf("tls: RootCAPEMs[%d]: %w", i, errRootCAPEMParseFailed)
 			}
-			return nil, fmt.Errorf("tls: RootCAPEMs[%d]: no CERTIFICATE blocks found", i)
+
+			return nil, fmt.Errorf("tls: RootCAPEMs[%d]: %w", i, errRootCAPEMNoCerts)
 		}
 	}
+
 	return pool, nil
 }
 
@@ -189,9 +219,11 @@ func (c *Config) clientCerts() ([]handshake.ClientCertificate, error) {
 		// Validate key type.
 		switch cert.PrivateKey.(type) {
 		case *rsa.PrivateKey, *ecdsa.PrivateKey:
-			// OK
+			// OK.
 		default:
-			return nil, fmt.Errorf("tls: Certificates[%d].PrivateKey has unsupported type %T; want *rsa.PrivateKey or *ecdsa.PrivateKey", i, cert.PrivateKey)
+			return nil, fmt.Errorf(
+				"tls: Certificates[%d].PrivateKey type %T: %w", i, cert.PrivateKey, errCertUnsupportedKeyType,
+			)
 		}
 
 		// RawCertificate is what gets emitted on the wire; validate
@@ -200,7 +232,7 @@ func (c *Config) clientCerts() ([]handshake.ClientCertificate, error) {
 		// produce a malformed zero-length certificate entry (RFC 5246 §7.4.2
 		// requires each entry in the list to be at least 1 byte).
 		if len(cert.RawCertificate) == 0 {
-			return nil, fmt.Errorf("tls: Certificates[%d].RawCertificate is empty", i)
+			return nil, fmt.Errorf("tls: Certificates[%d]: %w", i, errCertEmptyRaw)
 		}
 
 		if cert.Certificate == nil {
@@ -208,6 +240,7 @@ func (c *Config) clientCerts() ([]handshake.ClientCertificate, error) {
 			if err != nil {
 				return nil, fmt.Errorf("tls: Certificates[%d].RawCertificate: %w", i, err)
 			}
+
 			cert.Certificate = parsed
 		}
 
@@ -217,5 +250,6 @@ func (c *Config) clientCerts() ([]handshake.ClientCertificate, error) {
 			Certificate:    cert.Certificate,
 		})
 	}
+
 	return result, nil
 }

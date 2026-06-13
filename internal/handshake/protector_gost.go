@@ -12,10 +12,11 @@ import (
 // S-box selection follows gost-engine: tc26-Z for GOST R 34.10-2012 suites
 // (0xFF85, 0xC102), CryptoPro-A for GOST R 34.10-2001 suites (0x0081).
 func buildGOSTProtector(suite *suites.Suite, encKey, macKey, iv []byte) (record.Protector, error) {
-	sbox := gost.SboxCryptoProA // CryptoPro-A default
+	sbox := gost.SboxCryptoProA // CryptoPro-A default.
 	if suite.KX == suites.KexGOST2012_256 {
-		sbox = gost.SboxTC26Z // tc26-Z for 2012 suites
+		sbox = gost.SboxTC26Z // tc26-Z for 2012 suites.
 	}
+
 	return record.NewGOST28147Protector(encKey, macKey, iv, sbox)
 }
 

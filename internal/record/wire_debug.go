@@ -6,10 +6,13 @@ import (
 	"sync"
 )
 
+// wireDebugFilePerm is the permission mode for the debug log file.
+const wireDebugFilePerm = 0o644
+
 var (
 	wireDebugMu       sync.Mutex
 	wireDebugFile     *os.File
-	wireDebugOpenFail bool // set once on open failure; prevents stderr spam
+	wireDebugOpenFail bool // set once on open failure; prevents stderr spam.
 )
 
 // dumpPlaintext appends one human-readable line per record to the file named
@@ -32,12 +35,15 @@ func dumpPlaintext(dir string, seq uint64, contentType uint8, version uint16, pa
 	defer wireDebugMu.Unlock()
 
 	if wireDebugFile == nil && !wireDebugOpenFail {
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, wireDebugFilePerm)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "TLS_DEBUG_WIRE_LOG: open %q failed: %v\n", path, err)
+
 			wireDebugOpenFail = true
+
 			return
 		}
+
 		wireDebugFile = f
 	}
 
@@ -45,6 +51,6 @@ func dumpPlaintext(dir string, seq uint64, contentType uint8, version uint16, pa
 		return
 	}
 
-	fmt.Fprintf(wireDebugFile, "%s seq=%d type=%d ver=%04x len=%d hex=%x\n",
+	_, _ = fmt.Fprintf(wireDebugFile, "%s seq=%d type=%d ver=%04x len=%d hex=%x\n",
 		dir, seq, contentType, version, len(payload), payload)
 }

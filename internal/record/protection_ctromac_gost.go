@@ -35,8 +35,27 @@ import (
 )
 
 const (
-	kuznyechikKeySize = 32 // Kuznyechik key size
-	magmaKeySize      = 32 // Magma key size
+	kuznyechikKeySize = 32 // Kuznyechik key size.
+	magmaKeySize      = 32 // Magma key size.
+
+	// kuznyechikIVLen is the origIV length (bytes) for Kuznyechik CTR-OMAC.
+	kuznyechikIVLen = 8
+	// magmaIVLen is the origIV length (bytes) for Magma CTR-OMAC.
+	magmaIVLen = 4
+
+	// kuznyechikACPKMSection is the intra-record ACPKM rekey section size for
+	// Kuznyechik CTR (gost_grasshopper_cipher.c:334: c->section_size = 4096).
+	kuznyechikACPKMSection = 4096
+	// magmaACPKMSection is the intra-record ACPKM rekey section size for
+	// Magma CTR (gost_crypt.c:517: c->key_meshing = 1024).
+	magmaACPKMSection = 1024
+
+	// seqBytesLen is the length of the big-endian encoded record sequence number.
+	seqBytesLen = 8
+	// byteCarryShift is the bit shift used to extract the carry from an 8-bit add.
+	byteCarryShift = 8
+	// byteMask masks an integer to its lowest 8 bits.
+	byteMask = 0xff
 )
 
 // ctrOMACProtector implements Protector for Kuznyechik-CTR-OMAC and
@@ -49,13 +68,13 @@ const (
 // bytes for Magma (gost_crypt.c:517). OMAC has no intra-record rekeying —
 // TLS uses the plain kuznyechik-mac / magma-mac digest (gost_omac.c).
 type ctrOMACProtector struct {
-	newBlock     func(key []byte) cipher.Block // bound to kuznyechik or magma
-	blockSize    int                           // 8 (Magma) or 16 (Kuznyechik)
-	tagSize      int                           // 8 (Magma) or 16 (Kuznyechik)
-	origIV       []byte                        // 4 bytes (Magma) or 8 bytes (Kuznyechik); copied from constructor arg
+	newBlock     func(key []byte) cipher.Block // bound to kuznyechik or magma.
+	blockSize    int                           // 8 (Magma) or 16 (Kuznyechik).
+	tagSize      int                           // 8 (Magma) or 16 (Kuznyechik).
+	origIV       []byte                        // 4 bytes (Magma) or 8 bytes (Kuznyechik); copied from constructor arg.
 	encTree      *gost.TLSTree
 	macTree      *gost.TLSTree
-	acpkmSection int // 4096 (Kuznyechik) or 1024 (Magma); 0 disables
+	acpkmSection int // 4096 (Kuznyechik) or 1024 (Magma); 0 disables.
 }
 
 // NewKuznyechikCTROMACProtector creates a per-direction ctrOMACProtector for
@@ -73,16 +92,18 @@ func NewKuznyechikCTROMACProtector(encKey, macKey, iv []byte) (Protector, error)
 		return nil, fatalRecordError(fmt.Sprintf(
 			"KuznyechikCTROMAC enc key must be %d bytes, got %d", kuznyechikKeySize, len(encKey)))
 	}
+
 	if len(macKey) != kuznyechikKeySize {
 		return nil, fatalRecordError(fmt.Sprintf(
 			"KuznyechikCTROMAC mac key must be %d bytes, got %d", kuznyechikKeySize, len(macKey)))
 	}
-	if len(iv) != 8 {
+
+	if len(iv) != kuznyechikIVLen {
 		return nil, fatalRecordError(fmt.Sprintf(
-			"KuznyechikCTROMAC iv must be 8 bytes, got %d", len(iv)))
+			"KuznyechikCTROMAC iv must be %d bytes, got %d", kuznyechikIVLen, len(iv)))
 	}
 
-	origIV := make([]byte, 8)
+	origIV := make([]byte, kuznyechikIVLen)
 	copy(origIV, iv)
 
 	return &ctrOMACProtector{
@@ -90,11 +111,11 @@ func NewKuznyechikCTROMACProtector(encKey, macKey, iv []byte) (Protector, error)
 			return gost.NewKuznyechikCipher(key)
 		},
 		blockSize:    gost.KuznyechikBlockSize, // 16
-		tagSize:      gost.KuznyechikBlockSize, // 16 — OMAC tag = full block (gost_omac.c:48-56)
+		tagSize:      gost.KuznyechikBlockSize, // 16 — OMAC tag = full block (gost_omac.c:48-56).
 		origIV:       origIV,
 		encTree:      gost.NewTLSTreeKuznyechikCTROMAC(encKey),
 		macTree:      gost.NewTLSTreeKuznyechikCTROMAC(macKey),
-		acpkmSection: 4096, // gost_grasshopper_cipher.c:334 — c->section_size = 4096
+		acpkmSection: kuznyechikACPKMSection,
 	}, nil
 }
 
@@ -109,16 +130,18 @@ func NewMagmaCTROMACProtector(encKey, macKey, iv []byte) (Protector, error) {
 		return nil, fatalRecordError(fmt.Sprintf(
 			"MagmaCTROMAC enc key must be %d bytes, got %d", magmaKeySize, len(encKey)))
 	}
+
 	if len(macKey) != magmaKeySize {
 		return nil, fatalRecordError(fmt.Sprintf(
 			"MagmaCTROMAC mac key must be %d bytes, got %d", magmaKeySize, len(macKey)))
 	}
-	if len(iv) != 4 {
+
+	if len(iv) != magmaIVLen {
 		return nil, fatalRecordError(fmt.Sprintf(
-			"MagmaCTROMAC iv must be 4 bytes, got %d", len(iv)))
+			"MagmaCTROMAC iv must be %d bytes, got %d", magmaIVLen, len(iv)))
 	}
 
-	origIV := make([]byte, 4)
+	origIV := make([]byte, magmaIVLen)
 	copy(origIV, iv)
 
 	return &ctrOMACProtector{
@@ -126,47 +149,12 @@ func NewMagmaCTROMACProtector(encKey, macKey, iv []byte) (Protector, error) {
 			return gost.NewMagmaCipher(key)
 		},
 		blockSize:    gost.MagmaBlockSize, // 8
-		tagSize:      gost.MagmaBlockSize, // 8 — OMAC tag = full block (gost_omac.c:48-56)
+		tagSize:      gost.MagmaBlockSize, // 8 — OMAC tag = full block (gost_omac.c:48-56).
 		origIV:       origIV,
 		encTree:      gost.NewTLSTreeMagmaCTROMAC(encKey),
 		macTree:      gost.NewTLSTreeMagmaCTROMAC(macKey),
-		acpkmSection: 1024, // gost_crypt.c:517 — c->key_meshing = 1024 for magma_ctr_acpkm
+		acpkmSection: magmaACPKMSection,
 	}, nil
-}
-
-// adjustIV returns the CTR counter for the given record sequence number.
-//
-// For Kuznyechik (origIVLen=8, seqOffset=0):
-//
-//	out[0..8] = orig_iv[0..8] + seq[0..8]  (big-endian carry add)
-//	out[8..16] = 0x00 * 8
-//
-// For Magma (origIVLen=4, seqOffset=4):
-//
-//	out[0..4] = orig_iv[0..4] + seq[4..8]  (big-endian carry add)
-//	out[4..8] = 0x00 * 4
-//
-// References:
-//   - Kuznyechik: tmp/engine/gost_grasshopper_cipher.c:1147-1156
-//   - Magma:      tmp/engine/gost_crypt.c:1309-1318
-func (p *ctrOMACProtector) adjustIV(seq uint64) []byte {
-	out := make([]byte, p.blockSize)
-	copy(out, p.origIV) // [0..origIVLen] = origIV, high bytes already 0
-
-	var seqBytes [8]byte
-	binary.BigEndian.PutUint64(seqBytes[:], seq)
-
-	// For Kuznyechik: origIVLen=8, seqStart=0  → add seqBytes[0..8] into out[0..8].
-	// For Magma:      origIVLen=4, seqStart=4  → add seqBytes[4..8] into out[0..4].
-	origIVLen := len(p.origIV)
-	seqStart := 8 - origIVLen
-	carry := 0
-	for j := origIVLen - 1; j >= 0; j-- {
-		v := int(out[j]) + int(seqBytes[seqStart+j]) + carry
-		carry = v >> 8
-		out[j] = byte(v & 0xff)
-	}
-	return out
 }
 
 // Seal computes OMAC over `seq(8) || hdr(5) || plaintext`, then CTR-encrypts
@@ -191,15 +179,21 @@ func (p *ctrOMACProtector) Seal(seq uint64, hdr, plain []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fatalRecordError("ctrOMACProtector Seal OMAC init: " + err.Error())
 	}
+
 	var seqBytes [8]byte
+
 	binary.BigEndian.PutUint64(seqBytes[:], seq)
+
 	macHdr := macHeaderForOMAC(hdr, len(plain))
+
 	omac.Write(seqBytes[:]) //nolint: errcheck
 	omac.Write(macHdr[:])   //nolint: errcheck
 	omac.Write(plain)       //nolint: errcheck
+
 	tag := omac.Sum(nil)
 
 	iv := p.adjustIV(seq)
+
 	ctr, err := gost.NewCTRACPKM(p.newBlock, encKey, iv, p.acpkmSection)
 	if err != nil {
 		return nil, fatalRecordError("ctrOMACProtector Seal CTR init: " + err.Error())
@@ -209,6 +203,7 @@ func (p *ctrOMACProtector) Seal(seq uint64, hdr, plain []byte) ([]byte, error) {
 	copy(buf[:len(plain)], plain)
 	copy(buf[len(plain):], tag)
 	ctr.XORKeyStream(buf, buf)
+
 	return buf, nil
 }
 
@@ -219,10 +214,12 @@ func (p *ctrOMACProtector) Seal(seq uint64, hdr, plain []byte) ([]byte, error) {
 // which is what the engine test (test_tlstree.c:53-55 `rec0_header`) uses.
 func macHeaderForOMAC(hdr []byte, plainLen int) [5]byte {
 	var out [5]byte
+
 	out[0] = hdr[0]
 	out[1] = hdr[1]
 	out[2] = hdr[2]
 	binary.BigEndian.PutUint16(out[3:5], uint16(plainLen))
+
 	return out
 }
 
@@ -245,6 +242,7 @@ func (p *ctrOMACProtector) Open(seq uint64, hdr, fragment []byte) ([]byte, error
 	macBlock := p.newBlock(macKey)
 
 	iv := p.adjustIV(seq)
+
 	ctr, err := gost.NewCTRACPKM(p.newBlock, encKey, iv, p.acpkmSection)
 	if err != nil {
 		return nil, fatalRecordError("ctrOMACProtector Open CTR init: " + err.Error())
@@ -261,16 +259,61 @@ func (p *ctrOMACProtector) Open(seq uint64, hdr, fragment []byte) ([]byte, error
 	if err != nil {
 		return nil, fatalRecordError("ctrOMACProtector Open OMAC init: " + err.Error())
 	}
+
 	var seqBytes [8]byte
+
 	binary.BigEndian.PutUint64(seqBytes[:], seq)
+
 	macHdr := macHeaderForOMAC(hdr, plainEnd)
+
 	omac.Write(seqBytes[:]) //nolint: errcheck
 	omac.Write(macHdr[:])   //nolint: errcheck
 	omac.Write(plain)       //nolint: errcheck
+
 	expectedTag := omac.Sum(nil)
 
 	if subtle.ConstantTimeCompare(gotTag, expectedTag) != 1 {
 		return nil, NewFatalAlertError(AlertBadRecordMAC)
 	}
+
 	return plain, nil
+}
+
+// adjustIV returns the CTR counter for the given record sequence number.
+//
+// For Kuznyechik (origIVLen=8, seqOffset=0):
+//
+//	out[0..8] = orig_iv[0..8] + seq[0..8]  (big-endian carry add)
+//	out[8..16] = 0x00 * 8
+//
+// For Magma (origIVLen=4, seqOffset=4):
+//
+//	out[0..4] = orig_iv[0..4] + seq[4..8]  (big-endian carry add)
+//	out[4..8] = 0x00 * 4
+//
+// References:
+//   - Kuznyechik: tmp/engine/gost_grasshopper_cipher.c:1147-1156
+//   - Magma:      tmp/engine/gost_crypt.c:1309-1318
+func (p *ctrOMACProtector) adjustIV(seq uint64) []byte {
+	out := make([]byte, p.blockSize)
+	copy(out, p.origIV) // [0..origIVLen] = origIV, high bytes already 0.
+
+	var seqBytes [seqBytesLen]byte
+
+	binary.BigEndian.PutUint64(seqBytes[:], seq)
+
+	// For Kuznyechik: origIVLen=8, seqStart=0  → add seqBytes[0..8] into out[0..8].
+	// For Magma:      origIVLen=4, seqStart=4  → add seqBytes[4..8] into out[0..4].
+	origIVLen := len(p.origIV)
+	seqStart := seqBytesLen - origIVLen
+	carry := 0
+
+	for j := origIVLen - 1; j >= 0; j-- {
+		v := int(out[j]) + int(seqBytes[seqStart+j]) + carry
+
+		carry = v >> byteCarryShift
+		out[j] = byte(v & byteMask)
+	}
+
+	return out
 }

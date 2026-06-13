@@ -51,6 +51,7 @@ type psKeyTransportGost struct {
 // tmp/engine/gost_asn1.c:73.
 func marshalPSKeyTransport(psexp, ephemSPKIAlgo, ephemPubRaw, ukm []byte) ([]byte, error) {
 	var algID keAlgorithmIdentifier
+
 	if _, err := asn1.Unmarshal(ephemSPKIAlgo, &algID); err != nil {
 		return nil, fmt.Errorf("ke/pskeytransport_gost: unmarshal server SPKI algorithm: %w", err)
 	}
@@ -62,17 +63,19 @@ func marshalPSKeyTransport(psexp, ephemSPKIAlgo, ephemPubRaw, ukm []byte) ([]byt
 
 	spki := keSPKI{
 		Algorithm:        algID,
-		SubjectPublicKey: asn1.BitString{Bytes: octet, BitLength: len(octet) * 8},
+		SubjectPublicKey: asn1.BitString{Bytes: octet, BitLength: len(octet) * bitsPerByte},
 	}
 
 	pkt := psKeyTransportGost{
 		PsExp:    psexp,
 		EphemKey: spki,
-		UKM:      ukm, // nil → omitted per asn1:"optional"
+		UKM:      ukm, // nil → omitted per asn1:"optional".
 	}
+
 	der, err := asn1.Marshal(pkt)
 	if err != nil {
 		return nil, fmt.Errorf("ke/pskeytransport_gost: marshal PSKeyTransport_gost: %w", err)
 	}
+
 	return der, nil
 }

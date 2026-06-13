@@ -6,79 +6,109 @@ package handshake
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
+)
+
+// bitsPerByte is used in byte-extraction shift expressions to avoid magic-number warnings.
+const (
+	bitsPerByte   = 8
+	bitsPerUint16 = 2 * bitsPerByte // 16 bits.
+)
+
+// Sentinel errors for wire-parsing failures.
+var (
+	errTruncated1 = errors.New("handshake: truncated: need 1 byte")
+	errTruncated2 = errors.New("handshake: truncated: need 2 bytes")
+	errPfxUint8   = errors.New("handshake: truncated length prefix (uint8)")
+	errPfxUint16  = errors.New("handshake: truncated length prefix (uint16)")
+	errPfxUint24  = errors.New("handshake: truncated length prefix (uint24)")
+	errNeedBytes  = errors.New("handshake: truncated: insufficient bytes")
+	errBodyShort  = errors.New("handshake: truncated body")
 )
 
 // readUint8 reads one byte from b and returns the value and remaining slice.
 // Returns an error if b is empty.
 func readUint8(b []byte) (uint8, []byte, error) {
 	if len(b) < 1 {
-		return 0, nil, fmt.Errorf("handshake: truncated: need 1 byte, have %d", len(b))
+		return 0, nil, fmt.Errorf("%w, have %d", errTruncated1, len(b))
 	}
+
 	return b[0], b[1:], nil
 }
 
 // readUint16 reads a big-endian uint16 from b.
 func readUint16(b []byte) (uint16, []byte, error) {
-	if len(b) < 2 {
-		return 0, nil, fmt.Errorf("handshake: truncated: need 2 bytes, have %d", len(b))
-	}
-	return binary.BigEndian.Uint16(b[:2]), b[2:], nil
-}
+	const need = 2 // uint16 is 2 bytes.
 
-// readUint24 reads a 3-byte big-endian uint32 from b.
-func readUint24(b []byte) (uint32, []byte, error) {
-	if len(b) < 3 {
-		return 0, nil, fmt.Errorf("handshake: truncated: need 3 bytes, have %d", len(b))
+	if len(b) < need {
+		return 0, nil, fmt.Errorf("%w, have %d", errTruncated2, len(b))
 	}
-	v := uint32(b[0])<<16 | uint32(b[1])<<8 | uint32(b[2])
-	return v, b[3:], nil
+
+	return binary.BigEndian.Uint16(b[:need]), b[need:], nil
 }
 
 // readBytes reads exactly n bytes from b.
 func readBytes(b []byte, n int) ([]byte, []byte, error) {
 	if len(b) < n {
-		return nil, nil, fmt.Errorf("handshake: truncated: need %d bytes, have %d", n, len(b))
+		return nil, nil, fmt.Errorf("%w: need %d bytes, have %d", errNeedBytes, n, len(b))
 	}
+
 	return b[:n], b[n:], nil
 }
 
 // readLenPrefixed8 reads a uint8-length-prefixed blob.
 func readLenPrefixed8(b []byte) ([]byte, []byte, error) {
 	if len(b) < 1 {
-		return nil, nil, fmt.Errorf("handshake: truncated length prefix (uint8)")
+		return nil, nil, errPfxUint8
 	}
+
 	length := int(b[0])
+
 	b = b[1:]
+
 	if len(b) < length {
-		return nil, nil, fmt.Errorf("handshake: truncated body: declared %d bytes, have %d", length, len(b))
+		return nil, nil, fmt.Errorf("%w: declared %d bytes, have %d", errBodyShort, length, len(b))
 	}
+
 	return b[:length], b[length:], nil
 }
 
 // readLenPrefixed16 reads a uint16-length-prefixed blob.
 func readLenPrefixed16(b []byte) ([]byte, []byte, error) {
-	if len(b) < 2 {
-		return nil, nil, fmt.Errorf("handshake: truncated length prefix (uint16)")
+	const pfxLen = 2 // uint16 prefix is 2 bytes.
+
+	if len(b) < pfxLen {
+		return nil, nil, errPfxUint16
 	}
-	length := int(binary.BigEndian.Uint16(b[:2]))
-	b = b[2:]
+
+	length := int(binary.BigEndian.Uint16(b[:pfxLen]))
+
+	b = b[pfxLen:]
+
 	if len(b) < length {
-		return nil, nil, fmt.Errorf("handshake: truncated body: declared %d bytes, have %d", length, len(b))
+		return nil, nil, fmt.Errorf("%w: declared %d bytes, have %d", errBodyShort, length, len(b))
 	}
+
 	return b[:length], b[length:], nil
 }
 
 // readLenPrefixed24 reads a 3-byte-length-prefixed blob.
 func readLenPrefixed24(b []byte) ([]byte, []byte, error) {
-	if len(b) < 3 {
-		return nil, nil, fmt.Errorf("handshake: truncated length prefix (uint24)")
+	const pfxLen = 3 // uint24 prefix is 3 bytes.
+
+	if len(b) < pfxLen {
+		return nil, nil, errPfxUint24
 	}
+
 	length := int(uint32(b[0])<<16 | uint32(b[1])<<8 | uint32(b[2]))
-	b = b[3:]
+
+	b = b[pfxLen:]
+
 	if len(b) < length {
-		return nil, nil, fmt.Errorf("handshake: truncated body: declared %d bytes, have %d", length, len(b))
+		return nil, nil, fmt.Errorf("%w: declared %d bytes, have %d", errBodyShort, length, len(b))
 	}
+
 	return b[:length], b[length:], nil
 }
 
@@ -89,12 +119,12 @@ func appendUint8(dst []byte, v uint8) []byte {
 
 // appendUint16 appends a big-endian uint16.
 func appendUint16(dst []byte, v uint16) []byte {
-	return append(dst, byte(v>>8), byte(v))
+	return append(dst, byte(v>>bitsPerByte), byte(v))
 }
 
 // appendUint24 appends a 3-byte big-endian integer.
 func appendUint24(dst []byte, v uint32) []byte {
-	return append(dst, byte(v>>16), byte(v>>8), byte(v))
+	return append(dst, byte(v>>bitsPerUint16), byte(v>>bitsPerByte), byte(v))
 }
 
 // appendLenPrefixed8 appends a uint8-length-prefixed blob.
@@ -108,11 +138,5 @@ func appendLenPrefixed8(dst, data []byte) []byte {
 // appendLenPrefixed16 appends a uint16-length-prefixed blob.
 func appendLenPrefixed16(dst, data []byte) []byte {
 	dst = appendUint16(dst, uint16(len(data)))
-	return append(dst, data...)
-}
-
-// appendLenPrefixed24 appends a 3-byte-length-prefixed blob.
-func appendLenPrefixed24(dst, data []byte) []byte {
-	dst = appendUint24(dst, uint32(len(data)))
 	return append(dst, data...)
 }

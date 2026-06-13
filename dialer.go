@@ -35,5 +35,6 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 	if cfg == nil {
 		cfg = &Config{}
 	}
+
 	return dialBackend(ctx, network, addr, d.NetDialer, cfg)
 }

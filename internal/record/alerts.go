@@ -64,7 +64,7 @@ type RecordError struct {
 }
 
 func (e *RecordError) Error() string {
-	return fmt.Sprintf("tls record: %s", e.Message)
+	return "tls record: " + e.Message
 }
 
 func fatalRecordError(msg string) *RecordError {

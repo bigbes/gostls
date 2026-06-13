@@ -27,9 +27,46 @@ package ke
 import (
 	"crypto/rand"
 	"encoding/asn1"
+	"errors"
 	"fmt"
 
 	gost "github.com/bigbes/gostcrypto"
+)
+
+// VKO key exchange size constants.
+const (
+	// vkoUKMMinLen is the minimum UKM length; the TLS spec uses first 8 bytes per RFC 9189 §4.1.
+	vkoUKMMinLen = 8
+
+	// vkoPreMasterLen is the fixed 32-byte pre-master secret size for VKO exchanges.
+	vkoPreMasterLen = 32
+
+	// vkoKEKLen is the expected length of the VKO-derived key encryption key.
+	vkoKEKLen = 32
+
+	// cryptoProWrapEncKeyOff is the byte offset within KeyWrapCryptoPro output where
+	// the encrypted key starts (after the 8-byte UKM prefix).
+	cryptoProWrapEncKeyOff = 8
+
+	// cryptoProWrapEncKeyEnd is the byte offset where the encrypted key ends
+	// (UKM(8) + encryptedKey(32) = 40).
+	cryptoProWrapEncKeyEnd = 40
+
+	// cryptoProWrapIMITEnd is the byte offset where the IMIT (MAC) ends
+	// (UKM(8) + encryptedKey(32) + imit(4) = 44).
+	cryptoProWrapIMITEnd = 44
+)
+
+// Sentinel errors for VKO GOST key exchange validation.
+var (
+	errVKO2001CurveRequired   = errors.New("ke/vkogost: VKO2001 curve is required")
+	errVKO2001SpkiRequired    = errors.New("ke/vkogost: VKO2001 server SPKI AlgorithmIdentifier is required")
+	errVKO2001UKMTooShort     = errors.New("ke/vkogost: VKO2001 UKM must be at least 8 bytes")
+	errVKO2001BadPreMasterLen = errors.New("ke/vkogost: VKO2001TestCurve returned wrong number of bytes, want 32")
+	errVKO2001BadKEKLen       = errors.New("ke/vkogost: VKO2001 returned wrong number of bytes, want 32")
+	errVKO2012CurveRequired   = errors.New("ke/vkogost: VKO2012_256 curve is required")
+	errVKO2012SpkiRequired    = errors.New("ke/vkogost: VKO2012_256 server SPKI AlgorithmIdentifier is required")
+	errVKO2012UKMTooShort     = errors.New("ke/vkogost: VKO2012_256 UKM must be at least 8 bytes")
 )
 
 // oidTc26Gost28147ParamZ is the OID of id-tc26-gost-28147-param-Z (the
@@ -45,7 +82,7 @@ var oidTc26Gost28147ParamZ = asn1.ObjectIdentifier{1, 2, 643, 7, 1, 2, 5, 1, 1}
 // (tmp/engine/gost_ec_keyx.c:285-287) and NID_id_Gost28147_89_CryptoPro_A_ParamSet.
 var oidGost28147CryptoProA = asn1.ObjectIdentifier{1, 2, 643, 2, 2, 31, 1}
 
-// ── VKOGost2001Exchange ───────────────────────────────────────────────────────
+// ── VKOGost2001Exchange ───────────────────────────────────────────────────────.
 
 // VKOGost2001Exchange implements Exchange for GOST2001-GOST89-GOST89
 // (suite ID 0x0081). It uses GOST R 34.10-2001 VKO key agreement (RFC 4357)
@@ -56,11 +93,11 @@ var oidGost28147CryptoProA = asn1.ObjectIdentifier{1, 2, 643, 2, 2, 31, 1}
 // curve carried by the server's certificate.
 type VKOGost2001Exchange struct {
 	curve       *gost.Curve
-	spkiAlgo    []byte // server cert SPKI AlgorithmIdentifier DER (reused for ephem SPKI)
-	prvRaw      []byte // client ephemeral private key
-	ephemPubRaw []byte // client ephemeral public key (derived at construction)
-	pubRaw      []byte // server certificate public key
-	ukm         []byte // UKM = first 8 bytes of client_random
+	spkiAlgo    []byte // server cert SPKI AlgorithmIdentifier DER (reused for ephem SPKI).
+	prvRaw      []byte // client ephemeral private key.
+	ephemPubRaw []byte // client ephemeral public key (derived at construction).
+	pubRaw      []byte // server certificate public key.
+	ukm         []byte // UKM = first 8 bytes of client_random.
 }
 
 // NewVKOGost2001Exchange creates a VKOGost2001Exchange that generates a fresh
@@ -72,13 +109,16 @@ type VKOGost2001Exchange struct {
 // is derived from client_random (first 8 bytes).
 func NewVKOGost2001Exchange(curve *gost.Curve, spkiAlgo, pubRaw, ukm []byte) (*VKOGost2001Exchange, error) {
 	if curve == nil {
-		return nil, fmt.Errorf("ke/vkogost: VKO2001 curve is required")
+		return nil, fmt.Errorf("%w", errVKO2001CurveRequired)
 	}
+
 	if len(spkiAlgo) == 0 {
-		return nil, fmt.Errorf("ke/vkogost: VKO2001 server SPKI AlgorithmIdentifier is required")
+		return nil, fmt.Errorf("%w", errVKO2001SpkiRequired)
 	}
-	if len(ukm) < 8 {
-		return nil, fmt.Errorf("ke/vkogost: VKO2001 UKM must be at least 8 bytes, got %d", len(ukm))
+
+	if len(ukm) < vkoUKMMinLen {
+		return nil, fmt.Errorf("ke/vkogost: VKO2001 UKM must be at least 8 bytes, got %d: %w",
+			len(ukm), errVKO2001UKMTooShort)
 	}
 
 	prvRaw, ephemPubRaw, err := gost.GenerateEphemeralKey(curve, rand.Reader)
@@ -92,7 +132,7 @@ func NewVKOGost2001Exchange(curve *gost.Curve, spkiAlgo, pubRaw, ukm []byte) (*V
 		prvRaw:      prvRaw,
 		ephemPubRaw: ephemPubRaw,
 		pubRaw:      pubRaw,
-		ukm:         ukm[:8],
+		ukm:         ukm[:vkoUKMMinLen],
 	}, nil
 }
 
@@ -104,6 +144,13 @@ func GOST2001TestPublicKeyFromPrivate(prvRaw []byte) ([]byte, error) {
 	return gost.PublicKeyRawFromPrivate2001Test(prvRaw)
 }
 
+// vkoGost2001TestCurveExchange is the test-curve variant of VKOGost2001Exchange.
+type vkoGost2001TestCurveExchange struct {
+	prvRaw []byte
+	pubRaw []byte
+	ukm    []byte
+}
+
 // NewVKOGost2001ExchangeTestCurve creates a VKOGost2001Exchange that uses the
 // GOST R 34.10-2001 test parameter set curve (not CryptoPro-A). Used only in
 // unit tests that verify round-trip logic with upstream gogost test vectors.
@@ -113,26 +160,23 @@ func NewVKOGost2001ExchangeTestCurve(prvRaw, pubRaw, ukm []byte) *vkoGost2001Tes
 	return &vkoGost2001TestCurveExchange{prvRaw: prvRaw, pubRaw: pubRaw, ukm: ukm}
 }
 
-// vkoGost2001TestCurveExchange is the test-curve variant of VKOGost2001Exchange.
-type vkoGost2001TestCurveExchange struct {
-	prvRaw []byte
-	pubRaw []byte
-	ukm    []byte
-}
-
 func (e *vkoGost2001TestCurveExchange) ClientKeyExchange(_ []byte) (cke []byte, preMaster []byte, err error) {
 	preMaster, err = gost.VKO2001TestCurve(e.prvRaw, e.pubRaw, e.ukm)
 	if err != nil {
 		return nil, nil, fmt.Errorf("ke/vkogost: VKO2001TestCurve: %w", err)
 	}
-	if len(preMaster) != 32 {
-		return nil, nil, fmt.Errorf("ke/vkogost: VKO2001TestCurve returned %d bytes, want 32", len(preMaster))
+
+	if len(preMaster) != vkoPreMasterLen {
+		return nil, nil, fmt.Errorf("ke/vkogost: VKO2001TestCurve returned %d bytes, want 32: %w",
+			len(preMaster), errVKO2001BadPreMasterLen)
 	}
+
 	// CKE = raw public key from test-param-set curve.
 	cke, err = gost.PublicKeyRawFromPrivate2001Test(e.prvRaw)
 	if err != nil {
 		return nil, nil, fmt.Errorf("ke/vkogost: derive pubkey: %w", err)
 	}
+
 	return cke, preMaster, nil
 }
 
@@ -148,7 +192,7 @@ func (e *vkoGost2001TestCurveExchange) ClientKeyExchange(_ []byte) (cke []byte, 
 // shared key (CryptoPro-A S-box); the wrap output goes into GOST_KEY_INFO,
 // and the ephemeral public key + UKM go into GOST_KEY_AGREEMENT_INFO.
 func (e *VKOGost2001Exchange) ClientKeyExchange(_ []byte) (cke []byte, preMaster []byte, err error) {
-	preMaster = make([]byte, 32)
+	preMaster = make([]byte, vkoPreMasterLen)
 	if _, err := rand.Read(preMaster); err != nil {
 		return nil, nil, fmt.Errorf("ke/vkogost: VKO2001 premaster rand: %w", err)
 	}
@@ -157,8 +201,9 @@ func (e *VKOGost2001Exchange) ClientKeyExchange(_ []byte) (cke []byte, preMaster
 	if err != nil {
 		return nil, nil, fmt.Errorf("ke/vkogost: VKO2001 shared key: %w", err)
 	}
-	if len(kek) != 32 {
-		return nil, nil, fmt.Errorf("ke/vkogost: VKO2001 returned %d bytes, want 32", len(kek))
+
+	if len(kek) != vkoKEKLen {
+		return nil, nil, fmt.Errorf("ke/vkogost: VKO2001 returned %d bytes, want 32: %w", len(kek), errVKO2001BadKEKLen)
 	}
 
 	wrapped, err := gost.KeyWrapCryptoPro(gost.SboxCryptoProA, kek, e.ukm, preMaster)
@@ -169,18 +214,19 @@ func (e *VKOGost2001Exchange) ClientKeyExchange(_ []byte) (cke []byte, preMaster
 	cke, err = marshalGOSTKeyTransport(
 		e.spkiAlgo,
 		e.ephemPubRaw,
-		wrapped[8:40],
-		wrapped[40:44],
+		wrapped[cryptoProWrapEncKeyOff:cryptoProWrapEncKeyEnd],
+		wrapped[cryptoProWrapEncKeyEnd:cryptoProWrapIMITEnd],
 		oidGost28147CryptoProA,
 		e.ukm,
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("ke/vkogost: VKO2001 marshal GKT: %w", err)
 	}
+
 	return cke, preMaster, nil
 }
 
-// ── VKOGost2012_256Exchange ───────────────────────────────────────────────────
+// ── VKOGost2012_256Exchange ───────────────────────────────────────────────────.
 
 // VKOGost2012_256Exchange implements Exchange for GOST2012-GOST8912-GOST8912
 // (suite IDs 0xFF85 / 0xC102). It uses GOST R 34.10-2012 VKO with 256-bit KEK
@@ -189,11 +235,11 @@ func (e *VKOGost2001Exchange) ClientKeyExchange(_ []byte) (cke []byte, preMaster
 // for GOST2012-256 certificates; the 512-bit paramSetA may also appear.
 type VKOGost2012_256Exchange struct {
 	curve       *gost.Curve
-	spkiAlgo    []byte // server cert SPKI AlgorithmIdentifier DER (reused for ephem SPKI)
-	prvRaw      []byte // client ephemeral private key
-	ephemPubRaw []byte // client ephemeral public key (derived at construction)
-	pubRaw      []byte // server certificate public key
-	ukm         []byte // UKM = first 8 bytes of client_random
+	spkiAlgo    []byte // server cert SPKI AlgorithmIdentifier DER (reused for ephem SPKI).
+	prvRaw      []byte // client ephemeral private key.
+	ephemPubRaw []byte // client ephemeral public key (derived at construction).
+	pubRaw      []byte // server certificate public key.
+	ukm         []byte // UKM = first 8 bytes of client_random.
 }
 
 // NewVKOGost2012_256Exchange creates a VKOGost2012_256Exchange with a fresh
@@ -205,13 +251,16 @@ type VKOGost2012_256Exchange struct {
 // client_random (first 8 bytes).
 func NewVKOGost2012_256Exchange(curve *gost.Curve, spkiAlgo, pubRaw, ukm []byte) (*VKOGost2012_256Exchange, error) {
 	if curve == nil {
-		return nil, fmt.Errorf("ke/vkogost: VKO2012_256 curve is required")
+		return nil, fmt.Errorf("%w", errVKO2012CurveRequired)
 	}
+
 	if len(spkiAlgo) == 0 {
-		return nil, fmt.Errorf("ke/vkogost: VKO2012_256 server SPKI AlgorithmIdentifier is required")
+		return nil, fmt.Errorf("%w", errVKO2012SpkiRequired)
 	}
-	if len(ukm) < 8 {
-		return nil, fmt.Errorf("ke/vkogost: VKO2012_256 UKM must be at least 8 bytes, got %d", len(ukm))
+
+	if len(ukm) < vkoUKMMinLen {
+		return nil, fmt.Errorf("ke/vkogost: VKO2012_256 UKM must be at least 8 bytes, got %d: %w",
+			len(ukm), errVKO2012UKMTooShort)
 	}
 
 	prvRaw, ephemPubRaw, err := gost.GenerateEphemeralKey(curve, rand.Reader)
@@ -225,7 +274,7 @@ func NewVKOGost2012_256Exchange(curve *gost.Curve, spkiAlgo, pubRaw, ukm []byte)
 		prvRaw:      prvRaw,
 		ephemPubRaw: ephemPubRaw,
 		pubRaw:      pubRaw,
-		ukm:         ukm[:8],
+		ukm:         ukm[:vkoUKMMinLen],
 	}, nil
 }
 
@@ -237,7 +286,7 @@ func NewVKOGost2012_256Exchange(curve *gost.Curve, spkiAlgo, pubRaw, ukm []byte)
 // shared key; the wrap output goes into GOST_KEY_INFO, and the ephemeral
 // public key + UKM go into GOST_KEY_AGREEMENT_INFO.
 func (e *VKOGost2012_256Exchange) ClientKeyExchange(_ []byte) (cke []byte, preMaster []byte, err error) {
-	preMaster = make([]byte, 32)
+	preMaster = make([]byte, vkoPreMasterLen)
 	if _, err := rand.Read(preMaster); err != nil {
 		return nil, nil, fmt.Errorf("ke/vkogost: VKO2012_256 premaster rand: %w", err)
 	}
@@ -255,13 +304,14 @@ func (e *VKOGost2012_256Exchange) ClientKeyExchange(_ []byte) (cke []byte, preMa
 	cke, err = marshalGOSTKeyTransport(
 		e.spkiAlgo,
 		e.ephemPubRaw,
-		wrapped[8:40],
-		wrapped[40:44],
+		wrapped[cryptoProWrapEncKeyOff:cryptoProWrapEncKeyEnd],
+		wrapped[cryptoProWrapEncKeyEnd:cryptoProWrapIMITEnd],
 		oidTc26Gost28147ParamZ,
 		e.ukm,
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("ke/vkogost: VKO2012_256 marshal GKT: %w", err)
 	}
+
 	return cke, preMaster, nil
 }

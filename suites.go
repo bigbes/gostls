@@ -16,9 +16,11 @@ type SuiteInfo struct {
 func AllSuites() []SuiteInfo {
 	all := suites.All()
 	out := make([]SuiteInfo, len(all))
+
 	for i, s := range all {
 		out[i] = SuiteInfo{ID: s.ID, Name: s.Name}
 	}
+
 	return out
 }
 
@@ -29,5 +31,6 @@ func LookupSuiteByName(name string) (uint16, bool) {
 	if !ok {
 		return 0, false
 	}
+
 	return s.ID, true
 }

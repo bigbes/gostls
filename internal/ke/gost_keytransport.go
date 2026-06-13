@@ -5,6 +5,18 @@ import (
 	"fmt"
 )
 
+// ASN.1 DER encoding constants.
+const (
+	// bitsPerByte is used to compute BitLength for BIT STRING fields.
+	bitsPerByte = 8
+
+	// derLongFormMask is the high-bit mask indicating a long-form DER length.
+	derLongFormMask = 0x80
+
+	// derLengthBytesMask extracts the number of subsequent length bytes in long-form DER.
+	derLengthBytesMask = 0x7f
+)
+
 // ASN.1 structures for the TLS 1.2 GOST-CNT ClientKeyExchange body
 // (RFC 9189 §4.1). Mirrors gost-engine's ASN1_NDEF_SEQUENCE definitions
 // in gost_asn1.c.
@@ -87,6 +99,7 @@ func marshalGOSTKeyTransport(
 	ephIV []byte,
 ) ([]byte, error) {
 	var algID keAlgorithmIdentifier
+
 	if _, err := asn1.Unmarshal(spkiAlgo, &algID); err != nil {
 		return nil, fmt.Errorf("ke/gost_keytransport: unmarshal server SPKI algorithm: %w", err)
 	}
@@ -98,8 +111,9 @@ func marshalGOSTKeyTransport(
 
 	spki := keSPKI{
 		Algorithm:        algID,
-		SubjectPublicKey: asn1.BitString{Bytes: octet, BitLength: len(octet) * 8},
+		SubjectPublicKey: asn1.BitString{Bytes: octet, BitLength: len(octet) * bitsPerByte},
 	}
+
 	spkiDER, err := asn1.Marshal(spki)
 	if err != nil {
 		return nil, fmt.Errorf("ke/gost_keytransport: marshal ephemeral SPKI: %w", err)
@@ -125,6 +139,7 @@ func marshalGOSTKeyTransport(
 			},
 		},
 	}
+
 	return asn1.Marshal(params)
 }
 
@@ -133,8 +148,9 @@ func marshalGOSTKeyTransport(
 // outer SEQUENCE tag (0x30) and its length — we need to skip past both to
 // get to the SEQUENCE body.
 func lengthOfLength(first byte) int {
-	if first&0x80 == 0 {
-		return 0 // short form: length fits in the first byte, already counted
+	if first&derLongFormMask == 0 {
+		return 0 // short form: length fits in the first byte, already counted.
 	}
-	return int(first & 0x7f)
+
+	return int(first & derLengthBytesMask)
 }

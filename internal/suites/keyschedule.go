@@ -11,6 +11,18 @@ var ErrInvalidRandomLen = errors.New("suites/keyschedule: random values must be 
 // ErrZeroKeyBlock is returned when the total key material requested is zero.
 var ErrZeroKeyBlock = errors.New("suites/keyschedule: key block length must be greater than zero")
 
+// Key schedule size constants.
+const (
+	// tlsRandomLen is the length of ClientHello.random / ServerHello.random (RFC 5246 §7.4.1).
+	tlsRandomLen = 32
+	// tlsSeedLen is the concatenated seed length: clientRandom || serverRandom.
+	tlsSeedLen = tlsRandomLen * 2
+	// tlsMasterSecretLen is the master secret length (RFC 5246 §8.1).
+	tlsMasterSecretLen = 48
+	// keyExpansionFactor is the multiplier for client+server pairs in the key block.
+	keyExpansionFactor = 2
+)
+
 // MasterSecret derives the 48-byte TLS 1.2 master secret per RFC 5246 §8.1:
 //
 //	master_secret = PRF(pre_master_secret, "master secret",
@@ -24,21 +36,21 @@ func MasterSecret(suite *Suite, preMaster, clientRandom, serverRandom []byte) ([
 		return nil, ErrInvalidRandomLen
 	}
 
-	seed := make([]byte, 64)
-	copy(seed[:32], clientRandom)
-	copy(seed[32:], serverRandom)
+	seed := make([]byte, tlsSeedLen)
+	copy(seed[:tlsRandomLen], clientRandom)
+	copy(seed[tlsRandomLen:], serverRandom)
 
-	return PRF(suite.PRF.Hash, preMaster, []byte("master secret"), seed, 48)
+	return PRF(suite.PRF.Hash, preMaster, []byte("master secret"), seed, tlsMasterSecretLen)
 }
 
 // KeyMaterial holds the derived key material for one TLS session direction.
 type KeyMaterial struct {
-	ClientMACKey []byte // MAC key for client→server records (nil for AEAD)
-	ServerMACKey []byte // MAC key for server→client records (nil for AEAD)
-	ClientEncKey []byte // encryption key for client→server records
-	ServerEncKey []byte // encryption key for server→client records
-	ClientIV     []byte // implicit IV for client→server records
-	ServerIV     []byte // implicit IV for server→client records
+	ClientMACKey []byte // MAC key for client→server records (nil for AEAD).
+	ServerMACKey []byte // MAC key for server→client records (nil for AEAD).
+	ClientEncKey []byte // encryption key for client→server records.
+	ServerEncKey []byte // encryption key for server→client records.
+	ClientIV     []byte // implicit IV for client→server records.
+	ServerIV     []byte // implicit IV for server→client records.
 }
 
 // KeyExpansion derives the key material per RFC 5246 §6.3:
@@ -63,15 +75,15 @@ func KeyExpansion(suite *Suite, masterSecret, clientRandom, serverRandom []byte)
 	}
 
 	// key expansion seed is server_random || client_random per RFC 5246 §6.3.
-	seed := make([]byte, 64)
-	copy(seed[:32], serverRandom)
-	copy(seed[32:], clientRandom)
+	seed := make([]byte, tlsSeedLen)
+	copy(seed[:tlsRandomLen], serverRandom)
+	copy(seed[tlsRandomLen:], clientRandom)
 
 	macKeyLen := suite.MAC.KeyLen
 	encKeyLen := suite.Cipher.KeyLen
 	ivLen := suite.Cipher.FixedIVLen
 
-	totalLen := 2*macKeyLen + 2*encKeyLen + 2*ivLen
+	totalLen := keyExpansionFactor*macKeyLen + keyExpansionFactor*encKeyLen + keyExpansionFactor*ivLen
 	if totalLen == 0 {
 		return nil, ErrZeroKeyBlock
 	}
@@ -86,19 +98,27 @@ func KeyExpansion(suite *Suite, masterSecret, clientRandom, serverRandom []byte)
 
 	if macKeyLen > 0 {
 		km.ClientMACKey = keyBlock[off : off+macKeyLen]
+
 		off += macKeyLen
+
 		km.ServerMACKey = keyBlock[off : off+macKeyLen]
+
 		off += macKeyLen
 	}
 
 	km.ClientEncKey = keyBlock[off : off+encKeyLen]
+
 	off += encKeyLen
+
 	km.ServerEncKey = keyBlock[off : off+encKeyLen]
+
 	off += encKeyLen
 
 	if ivLen > 0 {
 		km.ClientIV = keyBlock[off : off+ivLen]
+
 		off += ivLen
+
 		km.ServerIV = keyBlock[off : off+ivLen]
 	}
 
@@ -126,6 +146,7 @@ func FinishedVerifyData(suite *Suite, masterSecret []byte, label string, transcr
 	if suite.KX == KexGOST2018_256 {
 		vdLen = 32
 	}
+
 	return PRF(suite.PRF.Hash, masterSecret, []byte(label), transcriptHash, vdLen)
 }
 

@@ -30,6 +30,7 @@ func parseAndVerifyLeaf(c *ClientState, rawLeaf []byte) (*x509.Certificate, [][]
 	if err != nil {
 		return nil, nil, fmt.Errorf("parse server leaf certificate: %w", err)
 	}
+
 	leafCert := gc.Stdlib
 
 	if gc.HasGOSTPubKey {
@@ -45,15 +46,23 @@ func parseAndVerifyLeaf(c *ClientState, rawLeaf []byte) (*x509.Certificate, [][]
 		if err != nil {
 			return nil, nil, err
 		}
+
+		intermediates, err := extractGOSTIntermediates(c.params.GOSTIntermediates)
+		if err != nil {
+			return nil, nil, err
+		}
+
 		opts := x509gost.VerifyOptions{
-			GOSTRoots:   roots,
-			DNSName:     c.params.ServerName,
-			CurrentTime: time.Now(),
-			KeyUsages:   []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+			GOSTRoots:         roots,
+			GOSTIntermediates: intermediates,
+			DNSName:           c.params.ServerName,
+			CurrentTime:       time.Now(),
+			KeyUsages:         []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		}
 		if _, err := gc.Verify(opts); err != nil {
 			return nil, nil, fmt.Errorf("GOST certificate verification failed: %w", err)
 		}
+
 		// x509gost.Verify returns chains of *x509gost.Certificate; the
 		// ClientState callback contract expects stdlib chains. For now we
 		// surface nil chains on the GOST path; VerifyPeerCertificate still
@@ -69,10 +78,12 @@ func parseAndVerifyLeaf(c *ClientState, rawLeaf []byte) (*x509.Certificate, [][]
 		CurrentTime: time.Now(),
 		KeyUsages:   []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
+
 	chains, err := leafCert.Verify(opts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("certificate verification failed: %w", err)
 	}
+
 	return leafCert, chains, nil
 }
 
@@ -83,12 +94,32 @@ func extractGOSTRoots(v any) ([]*x509gost.Certificate, error) {
 	if v == nil {
 		return nil, ErrGOSTRootsRequired
 	}
+
 	roots, ok := v.([]*x509gost.Certificate)
 	if !ok {
-		return nil, fmt.Errorf("tls: ClientParams.GOSTRoots has wrong type %T, want []*x509gost.Certificate", v)
+		return nil, fmt.Errorf("%w: got %T, want []*x509gost.Certificate", errGOSTRootsWrongType, v)
 	}
+
 	if len(roots) == 0 {
 		return nil, ErrGOSTRootsRequired
 	}
+
 	return roots, nil
+}
+
+// extractGOSTIntermediates asserts params.GOSTIntermediates to the expected
+// concrete type. Unlike the roots, intermediates are optional: a nil field is
+// valid and yields a nil pool (a direct leaf-signed-by-root chain). Only a
+// non-nil value of the wrong type is an error.
+func extractGOSTIntermediates(v any) ([]*x509gost.Certificate, error) {
+	if v == nil {
+		return nil, nil
+	}
+
+	intermediates, ok := v.([]*x509gost.Certificate)
+	if !ok {
+		return nil, fmt.Errorf("%w: got %T, want []*x509gost.Certificate", errGOSTIntermediatesWrongType, v)
+	}
+
+	return intermediates, nil
 }

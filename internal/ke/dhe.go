@@ -1,12 +1,44 @@
 package ke
 
 import (
-	"bytes"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"math/big"
 
 	"filippo.io/bigmod"
+)
+
+// DHE wire format constants.
+const (
+	// dheMinPBits is the minimum allowed bit length for the DHE prime p (1024).
+	dheMinPBits = 1024
+
+	// dheU16PrefixLen is the size of the 2-byte big-endian length prefix used
+	// in both the ServerKeyExchange and ClientKeyExchange DHE wire formats.
+	dheU16PrefixLen = 2
+
+	// dheMinG is the minimum allowed value for the DHE generator g.
+	dheMinG = 2
+
+	// u16ShiftBits is the number of bits to shift when reading/writing a 2-byte
+	// big-endian length field (high byte).
+	u16ShiftBits = 8
+
+	// ckeYcLenShift is the bit-shift for the high byte of the 2-byte CKE Yc length field.
+	ckeYcLenShift = 8
+)
+
+// Sentinel errors for DHE parameter validation and parsing.
+var (
+	errDHETrailingBytes = errors.New("ke: DHE: trailing bytes in serverParams")
+	errDHETooShort      = errors.New("too short for length prefix: need 2")
+	errDHETruncated     = errors.New("truncated")
+	errDHEPTooShort     = errors.New("ke: DHE: p is too short: minimum is 1024 bits")
+	errDHEPEven         = errors.New("ke: DHE: p is even — not a valid DH prime")
+	errDHEGTooSmall     = errors.New("ke: DHE: g must be ≥ 2")
+	errDHEYsLow         = errors.New("ke: DHE: Ys out of range: must be > 1")
+	errDHEYsHigh        = errors.New("ke: DHE: Ys out of range: must be < p-1")
 )
 
 // DHEExchange implements the finite-field Diffie-Hellman Ephemeral (DHE) key
@@ -119,10 +151,11 @@ func (d *DHEExchange) ClientKeyExchange(serverParams []byte) (cke []byte, preMas
 
 	// CKE body: 2-byte big-endian length + Yc bytes.
 	YcPadded := leftPad(Yc, len(pBytes))
-	cke = make([]byte, 2+len(YcPadded))
-	cke[0] = byte(len(YcPadded) >> 8)
+
+	cke = make([]byte, dheU16PrefixLen+len(YcPadded))
+	cke[0] = byte(len(YcPadded) >> ckeYcLenShift)
 	cke[1] = byte(len(YcPadded))
-	copy(cke[2:], YcPadded)
+	copy(cke[dheU16PrefixLen:], YcPadded)
 
 	return cke, preMaster, nil
 }
@@ -134,30 +167,39 @@ func parseDHEServerParams(params []byte) (p, g, Ys []byte, err error) {
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("ke: DHE: parse dh_p: %w", err)
 	}
+
 	g, rest, err = readU16LenPrefixed(rest)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("ke: DHE: parse dh_g: %w", err)
 	}
+
 	Ys, rest, err = readU16LenPrefixed(rest)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("ke: DHE: parse dh_Ys: %w", err)
 	}
+
 	if len(rest) != 0 {
-		return nil, nil, nil, fmt.Errorf("ke: DHE: trailing bytes in serverParams: %d", len(rest))
+		return nil, nil, nil, fmt.Errorf("ke: DHE: trailing bytes in serverParams: %d: %w",
+			len(rest), errDHETrailingBytes)
 	}
+
 	return p, g, Ys, nil
 }
 
 // readU16LenPrefixed reads a 2-byte big-endian length followed by that many bytes.
 func readU16LenPrefixed(b []byte) (data, rest []byte, err error) {
-	if len(b) < 2 {
-		return nil, nil, fmt.Errorf("too short for length prefix: need 2, have %d", len(b))
+	if len(b) < dheU16PrefixLen {
+		return nil, nil, fmt.Errorf("too short for length prefix: need 2, have %d: %w", len(b), errDHETooShort)
 	}
-	n := int(b[0])<<8 | int(b[1])
-	b = b[2:]
+
+	n := int(b[0])<<u16ShiftBits | int(b[1])
+
+	b = b[dheU16PrefixLen:]
+
 	if len(b) < n {
-		return nil, nil, fmt.Errorf("truncated: need %d bytes, have %d", n, len(b))
+		return nil, nil, fmt.Errorf("truncated: need %d bytes, have %d: %w", n, len(b), errDHETruncated)
 	}
+
 	return b[:n], b[n:], nil
 }
 
@@ -168,36 +210,38 @@ func readU16LenPrefixed(b []byte) (data, rest []byte, err error) {
 // is touched in this function.
 func validateDHEParams(pBytes, gBytes, YsBytes []byte) error {
 	// p must be at least 1024 bits.
-	if len(pBytes)*8 < 1024 {
-		return fmt.Errorf("ke: DHE: p is too short: %d bits, minimum is 1024", len(pBytes)*8)
+	pBits := len(pBytes) * bitsPerByte
+
+	if pBits < dheMinPBits {
+		return fmt.Errorf("ke: DHE: p is too short: %d bits, minimum is 1024: %w", pBits, errDHEPTooShort)
 	}
 
 	// p must be odd (necessary condition for primality; primes > 2 are odd).
 	// math/big used for public data only.
 	if len(pBytes) == 0 || pBytes[len(pBytes)-1]&1 == 0 {
-		return fmt.Errorf("ke: DHE: p is even — not a valid DH prime")
+		return fmt.Errorf("%w", errDHEPEven)
 	}
 
 	// g must be ≥ 2. math/big used for public data only.
-	gBig := new(big.Int).SetBytes(gBytes) //nolint:forbidigo // public data
-	if gBig.Cmp(big.NewInt(2)) < 0 {
-		return fmt.Errorf("ke: DHE: g must be ≥ 2, got %s", gBig)
+	gBig := new(big.Int).SetBytes(gBytes)
+	if gBig.Cmp(big.NewInt(dheMinG)) < 0 {
+		return fmt.Errorf("ke: DHE: g must be ≥ 2, got %s: %w", gBig, errDHEGTooSmall)
 	}
 
 	// Parse Ys and p for bounds check. math/big used for public data only.
-	pBig := new(big.Int).SetBytes(pBytes)   //nolint:forbidigo // public data
-	YsBig := new(big.Int).SetBytes(YsBytes) //nolint:forbidigo // public data
+	pBig := new(big.Int).SetBytes(pBytes)
+	YsBig := new(big.Int).SetBytes(YsBytes)
 
 	// Ys must be > 1 (not the identity element).
 	one := big.NewInt(1)
 	if YsBig.Cmp(one) <= 0 {
-		return fmt.Errorf("ke: DHE: Ys out of range: must be > 1, got %s", YsBig)
+		return fmt.Errorf("ke: DHE: Ys out of range: must be > 1, got %s: %w", YsBig, errDHEYsLow)
 	}
 
 	// Ys must be < p-1 (p-1 has order 2, a small-subgroup element for safe primes).
-	pMinus1 := new(big.Int).Sub(pBig, one) //nolint:forbidigo // public data
+	pMinus1 := new(big.Int).Sub(pBig, one)
 	if YsBig.Cmp(pMinus1) >= 0 {
-		return fmt.Errorf("ke: DHE: Ys out of range: must be < p-1")
+		return fmt.Errorf("%w", errDHEYsHigh)
 	}
 
 	return nil
@@ -227,9 +271,10 @@ func modExp(baseBytes, expBytes []byte, m *bigmod.Modulus) ([]byte, error) {
 		// Actually for g < p (always true for valid g), SetBytes should work.
 		// If it fails, fall back to SetOverflowingBytes.
 		var err2 error
+
 		base, err2 = bigmod.NewNat().SetOverflowingBytes(baseBytes, m)
 		if err2 != nil {
-			return nil, fmt.Errorf("ke: DHE: load base into modulus: %w (original: %v)", err2, err)
+			return nil, fmt.Errorf("ke: DHE: load base into modulus: %w (original: %w)", err2, err)
 		}
 	}
 
@@ -238,6 +283,7 @@ func modExp(baseBytes, expBytes []byte, m *bigmod.Modulus) ([]byte, error) {
 	// Montgomery ladder. The exponent itself is not loaded into a Nat — bigmod
 	// takes it as []byte directly, keeping the constant-time guarantee.
 	result := bigmod.NewNat().Exp(base, expBytes, m)
+
 	return result.Bytes(m), nil
 }
 
@@ -247,132 +293,9 @@ func leftPad(b []byte, n int) []byte {
 	if len(b) >= n {
 		return b
 	}
+
 	padded := make([]byte, n)
 	copy(padded[n-len(b):], b)
+
 	return padded
-}
-
-// ============================================================================
-// RFC 7919 named group prime constants
-// ============================================================================
-
-// ffdhe2048P is the 2048-bit safe prime from RFC 7919 Appendix A.1.
-// Generator g = 2.
-var ffdhe2048P = mustDecodeHex(
-	"FFFFFFFFFFFFFFFF" +
-		"ADF85458A2BB4A9A" +
-		"AFDC5620273D3CF1" +
-		"D8B9C583CE2D3695" +
-		"A9E13641146433FB" +
-		"CC939DCE249B3EF9" +
-		"7D2FE363630C75D8" +
-		"F681B202AEC4617A" +
-		"D3DF1ED5D5FD6561" +
-		"2433F51F5F066ED0" +
-		"856365553DED1AF3" +
-		"B557135E7F57C935" +
-		"984F0C70E0E68B77" +
-		"E2A689DAF3EFE872" +
-		"1DF158A136ADE735" +
-		"30ACCA4F483A797A" +
-		"BC0AB182B324FB61" +
-		"D108A94BB2C8E3FB" +
-		"B96ADAB760D7F468" +
-		"1D4F42A3DE394DF4" +
-		"AE56EDE76372BB19" +
-		"0B07A7C8EE0A6D70" +
-		"9E02FCE1CDF7E2EC" +
-		"C03405CD28342F61" +
-		"9172FE9CE98583FF" +
-		"8E4F1232EEF28183" +
-		"C3FE3B1B4C6FAD73" +
-		"3BB5FCBC2EC22005" +
-		"C58EF1837D1683B2" +
-		"C6F34A26C1B2EFFA" +
-		"886B423861285C97" +
-		"FFFFFFFFFFFFFFFF",
-)
-
-// ffdhe3072P is the 3072-bit safe prime from RFC 7919 Appendix A.2.
-// Generator g = 2.
-var ffdhe3072P = mustDecodeHex(
-	"FFFFFFFFFFFFFFFF" +
-		"ADF85458A2BB4A9A" +
-		"AFDC5620273D3CF1" +
-		"D8B9C583CE2D3695" +
-		"A9E13641146433FB" +
-		"CC939DCE249B3EF9" +
-		"7D2FE363630C75D8" +
-		"F681B202AEC4617A" +
-		"D3DF1ED5D5FD6561" +
-		"2433F51F5F066ED0" +
-		"856365553DED1AF3" +
-		"B557135E7F57C935" +
-		"984F0C70E0E68B77" +
-		"E2A689DAF3EFE872" +
-		"1DF158A136ADE735" +
-		"30ACCA4F483A797A" +
-		"BC0AB182B324FB61" +
-		"D108A94BB2C8E3FB" +
-		"B96ADAB760D7F468" +
-		"1D4F42A3DE394DF4" +
-		"AE56EDE76372BB19" +
-		"0B07A7C8EE0A6D70" +
-		"9E02FCE1CDF7E2EC" +
-		"C03405CD28342F61" +
-		"9172FE9CE98583FF" +
-		"8E4F1232EEF28183" +
-		"C3FE3B1B4C6FAD73" +
-		"3BB5FCBC2EC22005" +
-		"C58EF1837D1683B2" +
-		"C6F34A26C1B2EFFA" +
-		"886B423861285C97" +
-		"ADB1A48CB7B1B8CD" +
-		"B9D6A56BCF4B58E7" +
-		"6A2CD9E5E25EC4F5" +
-		"2B58F1D385A68ABD" +
-		"BE9BCEF305B7D3CB" +
-		"8D9AD78A41B16B17" +
-		"B479D4E5ACCA0BB2" +
-		"F4FAEDD3D13D5CAB" +
-		"9BD0456AC0BEDB2B" +
-		"E8CADFA43AFFE97B" +
-		"BC23FF7AF68E7DA0" +
-		"50F3B88DC7D0F282" +
-		"7DFFF810DC30F0AB" +
-		"37C34BC0B76C8E6A" +
-		"69266EDAD58F8F81" +
-		"FCBFCCE7FFEB88AF" +
-		"FFFFFFFFFFFFFFFF",
-)
-
-// isNamedFFDHEGroup returns true if p matches one of the RFC 7919 named groups.
-// This enables stricter validation for known groups.
-func isNamedFFDHEGroup(p []byte) bool {
-	return bytes.Equal(p, ffdhe2048P) || bytes.Equal(p, ffdhe3072P)
-}
-
-// mustDecodeHex decodes a hex string (no spaces) and panics on error.
-// Used only for package-level constants.
-func mustDecodeHex(s string) []byte {
-	b := make([]byte, len(s)/2)
-	for i := range b {
-		hi := hexNibble(s[2*i])
-		lo := hexNibble(s[2*i+1])
-		b[i] = hi<<4 | lo
-	}
-	return b
-}
-
-func hexNibble(c byte) byte {
-	switch {
-	case c >= '0' && c <= '9':
-		return c - '0'
-	case c >= 'A' && c <= 'F':
-		return c - 'A' + 10
-	case c >= 'a' && c <= 'f':
-		return c - 'a' + 10
-	default:
-		panic(fmt.Sprintf("ke: invalid hex nibble %q", c))
-	}
 }

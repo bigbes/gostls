@@ -14,8 +14,22 @@ import (
 	"github.com/bigbes/gostls/internal/suites"
 )
 
-// errConnClosed is returned by Read/Write on a closed connection.
-var errConnClosed = errors.New("tls: connection closed")
+// Sentinel errors for conn.go operations.
+var (
+	// errConnClosed is returned by Read/Write on a closed connection.
+	errConnClosed = errors.New("tls: connection closed")
+	// errNoSuites is returned when no cipher suites are available for negotiation.
+	errNoSuites = errors.New("tls: no cipher suites available for negotiation")
+	// errAlertTruncated is returned when an alert record is too short.
+	errAlertTruncated = errors.New("tls: truncated alert record")
+	// errAlertReceived is wrapped with level/desc when a non-close_notify alert arrives.
+	errAlertReceived = errors.New("tls: received alert")
+	// errUnexpectedRecord is wrapped with the content type when an unexpected record type arrives.
+	errUnexpectedRecord = errors.New("tls: unexpected record type in application data phase")
+)
+
+// alertMinLen is the minimum length of a TLS alert record (level + description).
+const alertMinLen = 2
 
 // Compile-time interface check.
 var _ net.Conn = (*Conn)(nil)
@@ -58,6 +72,7 @@ func newConn(c net.Conn, config *Config) *Conn {
 	if config == nil {
 		config = &Config{}
 	}
+
 	return &Conn{
 		conn:   c,
 		config: config,
@@ -71,42 +86,8 @@ func (c *Conn) Handshake() error {
 	c.handshakeOnce.Do(func() {
 		c.handshakeErr = c.doHandshake()
 	})
+
 	return c.handshakeErr
-}
-
-// doHandshake performs the TLS 1.2 client handshake.
-// It is called at most once, protected by handshakeOnce.
-func (c *Conn) doHandshake() error {
-	offeredSuites := c.config.CipherSuites
-	if offeredSuites == nil {
-		offeredSuites = handshake.AvailableSuites()
-	}
-	if len(offeredSuites) == 0 {
-		return fmt.Errorf("tls: no cipher suites available for negotiation")
-	}
-
-	rootCAs, err := c.config.rootCAPool()
-	if err != nil {
-		return err
-	}
-
-	clientCerts, err := c.config.clientCerts()
-	if err != nil {
-		return err
-	}
-
-	params := handshake.ClientParams{
-		Rand:                  c.config.rand(),
-		ServerName:            c.config.ServerName,
-		OfferedSuites:         offeredSuites,
-		RootCAs:               rootCAs,
-		InsecureSkipVerify:    c.config.InsecureSkipVerify,
-		VerifyPeerCertificate: c.config.VerifyPeerCertificate,
-		Certificates:          clientCerts,
-	}
-
-	state := handshake.NewClientState(c.layer, params)
-	return state.Handshake()
 }
 
 // Read reads decrypted application data from the connection.
@@ -126,7 +107,9 @@ func (c *Conn) Read(b []byte) (int, error) {
 	// Drain any buffered data first.
 	if len(c.readBuf) > 0 {
 		n := copy(b, c.readBuf)
+
 		c.readBuf = c.readBuf[n:]
+
 		return n, nil
 	}
 
@@ -136,30 +119,37 @@ func (c *Conn) Read(b []byte) (int, error) {
 		if err != nil {
 			return 0, err
 		}
+
 		switch ct {
 		case record.ContentTypeApplicationData:
 			if len(payload) == 0 {
 				continue
 			}
+
 			n := copy(b, payload)
 			if n < len(payload) {
 				// Buffer the remainder.
 				c.readBuf = append(c.readBuf, payload[n:]...)
 			}
+
 			return n, nil
 
 		case record.ContentTypeAlert:
-			if len(payload) < 2 {
-				return 0, fmt.Errorf("tls: truncated alert record")
+			if len(payload) < alertMinLen {
+				return 0, errAlertTruncated
 			}
+
 			level, desc := record.DecodeAlert(payload)
 			if desc == record.AlertCloseNotify {
 				return 0, io.EOF
 			}
-			return 0, fmt.Errorf("tls: received alert level=%d desc=%d", level, desc)
+
+			return 0, fmt.Errorf("tls: received alert level=%d desc=%d: %w", level, desc, errAlertReceived)
 
 		default:
-			return 0, fmt.Errorf("tls: unexpected record type %d in application data phase", ct)
+			return 0, fmt.Errorf(
+				"tls: unexpected record type %d in application data phase: %w", ct, errUnexpectedRecord,
+			)
 		}
 	}
 }
@@ -179,19 +169,25 @@ func (c *Conn) Write(b []byte) (int, error) {
 		return 0, errConnClosed
 	}
 
-	const maxChunk = 1 << 14 // 16384 bytes
+	const maxChunk = 1 << 14 // 16384 bytes.
+
 	written := 0
+
 	for len(b) > 0 {
 		chunk := b
 		if len(chunk) > maxChunk {
 			chunk = chunk[:maxChunk]
 		}
+
 		if err := c.layer.WriteRecord(record.ContentTypeApplicationData, chunk); err != nil {
 			return written, err
 		}
+
 		written += len(chunk)
+
 		b = b[len(chunk):]
 	}
+
 	return written, nil
 }
 
@@ -209,6 +205,7 @@ func (c *Conn) Close() error {
 	// Send close_notify if handshake succeeded.
 	if c.handshakeErr == nil {
 		c.outMu.Lock()
+
 		alertBody := record.EncodeAlert(record.AlertLevelWarning, record.AlertCloseNotify)
 		// Best effort: ignore write error since we're closing anyway.
 		_ = c.layer.WriteRecord(record.ContentTypeAlert, alertBody)
@@ -241,6 +238,43 @@ func (c *Conn) SetReadDeadline(t time.Time) error {
 // SetWriteDeadline sets the deadline for future Write calls.
 func (c *Conn) SetWriteDeadline(t time.Time) error {
 	return c.conn.SetWriteDeadline(t)
+}
+
+// doHandshake performs the TLS 1.2 client handshake.
+// It is called at most once, protected by handshakeOnce.
+func (c *Conn) doHandshake() error {
+	offeredSuites := c.config.CipherSuites
+	if offeredSuites == nil {
+		offeredSuites = handshake.AvailableSuites()
+	}
+
+	if len(offeredSuites) == 0 {
+		return errNoSuites
+	}
+
+	rootCAs, err := c.config.rootCAPool()
+	if err != nil {
+		return err
+	}
+
+	clientCerts, err := c.config.clientCerts()
+	if err != nil {
+		return err
+	}
+
+	params := handshake.ClientParams{
+		Rand:                  c.config.rand(),
+		ServerName:            c.config.ServerName,
+		OfferedSuites:         offeredSuites,
+		RootCAs:               rootCAs,
+		InsecureSkipVerify:    c.config.InsecureSkipVerify,
+		VerifyPeerCertificate: c.config.VerifyPeerCertificate,
+		Certificates:          clientCerts,
+	}
+
+	state := handshake.NewClientState(c.layer, params)
+
+	return state.Handshake()
 }
 
 // ConnectionState holds information about a TLS connection.

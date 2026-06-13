@@ -12,23 +12,23 @@ import "hash"
 type KexKind uint8
 
 const (
-	KexRSA          KexKind = iota // RSA static key exchange
-	KexDHE                         // ephemeral Diffie-Hellman
-	KexECDHE                       // ephemeral Elliptic-Curve Diffie-Hellman
-	KexGOST2001                    // GOST R 34.10-2001 VKO key agreement (RFC 4357, RFC 9189)
-	KexGOST2012_256                // GOST R 34.10-2012 VKO key agreement, 256-bit KEK (RFC 7836, RFC 9189)
-	KexGOST2018_256                // GOST 2018 key transport (RFC 9367 suites 0xC100 / 0xC101)
+	KexRSA          KexKind = iota // RSA static key exchange.
+	KexDHE                         // ephemeral Diffie-Hellman.
+	KexECDHE                       // ephemeral Elliptic-Curve Diffie-Hellman.
+	KexGOST2001                    // GOST R 34.10-2001 VKO key agreement (RFC 4357, RFC 9189).
+	KexGOST2012_256                // GOST R 34.10-2012 VKO key agreement, 256-bit KEK (RFC 7836, RFC 9189).
+	KexGOST2018_256                // GOST 2018 key transport (RFC 9367 suites 0xC100 / 0xC101).
 )
 
 // AuthKind identifies the authentication algorithm used by a suite.
 type AuthKind uint8
 
 const (
-	AuthRSA          AuthKind = iota // RSA certificate authentication
-	AuthECDSA                        // ECDSA certificate authentication
-	AuthAnonymous                    // anonymous (reserved; no registered suite uses this)
-	AuthGOST2001                     // GOST R 34.10-2001 certificate authentication
-	AuthGOST2012_256                 // GOST R 34.10-2012 (256-bit) certificate authentication
+	AuthRSA          AuthKind = iota // RSA certificate authentication.
+	AuthECDSA                        // ECDSA certificate authentication.
+	AuthAnonymous                    // anonymous (reserved; no registered suite uses this).
+	AuthGOST2001                     // GOST R 34.10-2001 certificate authentication.
+	AuthGOST2012_256                 // GOST R 34.10-2012 (256-bit) certificate authentication.
 )
 
 // CipherSpec describes the symmetric cipher used by a suite.
@@ -45,20 +45,20 @@ const (
 //
 // TagLen is the AEAD authentication tag length (0 for MAC-based suites).
 type CipherSpec struct {
-	Name          string // e.g. "AES-128-CBC", "AES-256-GCM", "CHACHA20-POLY1305"
-	KeyLen        int    // encryption key length in bytes
-	FixedIVLen    int    // implicit IV / salt length in bytes
-	ExplicitIVLen int    // per-record explicit IV / nonce length in bytes (0 for ChaCha20)
-	AEAD          bool   // true for AEAD suites; false for MAC-then-encrypt suites
-	TagLen        int    // AEAD tag length in bytes (0 for non-AEAD)
+	Name          string // e.g. "AES-128-CBC", "AES-256-GCM", "CHACHA20-POLY1305".
+	KeyLen        int    // encryption key length in bytes.
+	FixedIVLen    int    // implicit IV / salt length in bytes.
+	ExplicitIVLen int    // per-record explicit IV / nonce length in bytes (0 for ChaCha20).
+	AEAD          bool   // true for AEAD suites; false for MAC-then-encrypt suites.
+	TagLen        int    // AEAD tag length in bytes (0 for non-AEAD).
 }
 
 // MACSpec describes the MAC algorithm used by a MAC-then-encrypt suite.
 // For AEAD suites all fields are zero/nil.
 type MACSpec struct {
-	Hash   func() hash.Hash // nil for AEAD suites
-	KeyLen int              // MAC key length in bytes
-	MACLen int              // MAC output length in bytes
+	Hash   func() hash.Hash // nil for AEAD suites.
+	KeyLen int              // MAC key length in bytes.
+	MACLen int              // MAC output length in bytes.
 }
 
 // PRFSpec describes the PRF hash used for this suite (RFC 5246 §5).
@@ -71,7 +71,7 @@ type PRFSpec struct {
 // Suite is a fully described TLS 1.2 cipher suite.
 type Suite struct {
 	ID     uint16
-	Name   string // OpenSSL-style name
+	Name   string // OpenSSL-style name.
 	KX     KexKind
 	Auth   AuthKind
 	Cipher CipherSpec
@@ -90,9 +90,11 @@ func register(s *Suite) {
 	if _, dup := registry[s.ID]; dup {
 		panic("suites: duplicate suite ID " + s.Name)
 	}
+
 	if _, dup := nameIndex[s.Name]; dup {
 		panic("suites: duplicate suite name " + s.Name)
 	}
+
 	registry[s.ID] = s
 	nameIndex[s.Name] = s
 }
@@ -115,5 +117,6 @@ func All() []*Suite {
 	for _, s := range registry {
 		out = append(out, s)
 	}
+
 	return out
 }

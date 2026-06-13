@@ -24,12 +24,13 @@ import (
 
 // ============================================================================
 // helpers
-// ============================================================================
+// ============================================================================.
 
 // buildCertificateRequest builds a handshake CertificateRequest envelope.
 // sigAlgs is a list of (hash, sig) pairs.
 func buildCertificateRequest(certTypes []uint8, sigAlgs [][2]uint8) []byte {
 	var body []byte
+
 	body = append(body, byte(len(certTypes)))
 	body = append(body, certTypes...)
 
@@ -38,20 +39,24 @@ func buildCertificateRequest(certTypes []uint8, sigAlgs [][2]uint8) []byte {
 		sigBytes[2*i] = sa[0]
 		sigBytes[2*i+1] = sa[1]
 	}
+
 	body = appendUint16(body, uint16(len(sigBytes)))
 	body = append(body, sigBytes...)
-	body = appendUint16(body, 0) // empty CA list
-	return wrapHS(13, body)      // type 13 = CertificateRequest
+	body = appendUint16(body, 0) // empty CA list.
+
+	return wrapHS(13, body) // type 13 = CertificateRequest.
 }
 
 // newTestClientRSACert generates an RSA-2048 client certificate, returning the
 // private key, DER bytes, and parsed certificate.
 func newTestClientRSACert(t *testing.T) (*rsa.PrivateKey, []byte, *x509.Certificate) {
 	t.Helper()
+
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatalf("gen client RSA key: %v", err)
 	}
+
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(100),
 		Subject:      pkix.Name{CommonName: "client-auth"},
@@ -59,14 +64,17 @@ func newTestClientRSACert(t *testing.T) (*rsa.PrivateKey, []byte, *x509.Certific
 		NotAfter:     time.Now().Add(24 * time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 	}
+
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
 		t.Fatalf("create client cert: %v", err)
 	}
+
 	cert, err := x509.ParseCertificate(der)
 	if err != nil {
 		t.Fatalf("parse client cert: %v", err)
 	}
+
 	return key, der, cert
 }
 
@@ -95,10 +103,11 @@ func runServerWithCertReq(
 	t.Helper()
 
 	var res clientAuthServerResult
+
 	srvLayer := record.NewLayer(srvConn)
 
 	// Helper to fail with context.
-	fail := func(format string, args ...interface{}) clientAuthServerResult {
+	fail := func(format string, args ...any) clientAuthServerResult {
 		res.err = fmt.Errorf(format, args...)
 		return res
 	}
@@ -110,8 +119,11 @@ func runServerWithCertReq(
 	if err != nil || chCT != record.ContentTypeHandshake {
 		return fail("read ClientHello: %v", err)
 	}
+
 	tr.Write(chPayload)
+
 	var clientRandom [32]byte
+
 	copy(clientRandom[:], chPayload[6:38])
 
 	// Send ServerHello.
@@ -139,6 +151,7 @@ func runServerWithCertReq(
 	if err != nil {
 		return fail("read client Certificate: %v", err)
 	}
+
 	tr.Write(clientCertPayload)
 
 	// Read client CKE.
@@ -146,6 +159,7 @@ func runServerWithCertReq(
 	if err != nil {
 		return fail("read client CKE: %v", err)
 	}
+
 	tr.Write(ckePayload)
 
 	// Snapshot the transcript after CKE (before CertificateVerify).
@@ -157,44 +171,43 @@ func runServerWithCertReq(
 		return fail("read after CKE: %v", err)
 	}
 
-	if nextCT == record.ContentTypeHandshake && len(nextPayload) >= 4 && nextPayload[0] == 15 {
-		// CertificateVerify.
+	isCertVerify := nextCT == record.ContentTypeHandshake &&
+		len(nextPayload) >= 4 &&
+		nextPayload[0] == 15 // handshake type 15 = CertificateVerify.
+
+	switch {
+	case isCertVerify:
 		res.certVerifySeen = true
-		bodyLen := uint32(nextPayload[1])<<16 | uint32(nextPayload[2])<<8 | uint32(nextPayload[3])
-		cvBody := nextPayload[4 : 4+bodyLen]
-		if len(cvBody) >= 4 {
-			sigLen := int(cvBody[2])<<8 | int(cvBody[3])
-			if len(cvBody) >= 4+sigLen {
-				res.cvAlg = [2]uint8{cvBody[0], cvBody[1]}
-				res.cvSig = append([]byte(nil), cvBody[4:4+sigLen]...)
-			}
-		}
+		parseCertVerifyBody(&res, nextPayload)
 		tr.Write(nextPayload)
 
-		// Read CCS.
+		// Read CCS that follows CertificateVerify.
 		for {
 			ct, payload, err := srvLayer.ReadRecord()
 			if err != nil {
 				return fail("read CCS: %v", err)
 			}
+
 			if ct == record.ContentTypeChangeCipherSpec && len(payload) == 1 && payload[0] == 1 {
 				break
 			}
 		}
-	} else if nextCT == record.ContentTypeChangeCipherSpec {
+	case nextCT == record.ContentTypeChangeCipherSpec:
 		// No CertificateVerify.
 		res.certVerifySeen = false
-	} else {
+	default:
 		return fail("unexpected record after CKE: ct=%d type=%d", nextCT, nextPayload[0])
 	}
 
 	// Decrypt pre-master from CKE body.
-	// CKE body (inside envelope): uint16 ciphertext_len || ciphertext
-	ckeBody := ckePayload[4:] // skip 4-byte handshake envelope
+	// CKE body (inside envelope): uint16 ciphertext_len || ciphertext.
+	ckeBody := ckePayload[4:] // skip 4-byte handshake envelope.
 	if len(ckeBody) < 2 {
 		return fail("CKE body too short")
 	}
+
 	ciphertext := ckeBody[2:]
+
 	preMaster, err := rsa.DecryptPKCS1v15(rand.Reader, testServerKey, ciphertext)
 	if err != nil {
 		return fail("decrypt pre-master: %v", err)
@@ -214,6 +227,7 @@ func runServerWithCertReq(
 	if err != nil {
 		return fail("recv protector: %v", err)
 	}
+
 	srvLayer.ChangeCipherSpec(nil, recvProt)
 
 	// Read client Finished.
@@ -221,29 +235,57 @@ func runServerWithCertReq(
 	if err != nil {
 		return fail("read Finished: %v", err)
 	}
+
 	tr.Write(finPayload)
 
 	// Send server CCS + Finished.
 	srvLayer.WriteRecord(record.ContentTypeChangeCipherSpec, []byte{1}) //nolint:errcheck
+
 	sendProt, err := buildProtectorForTest(suite, km.ServerEncKey, km.ServerMACKey, km.ServerIV)
 	if err != nil {
 		return fail("send protector: %v", err)
 	}
+
 	srvLayer.ChangeCipherSpec(sendProt, nil)
+
 	serverFinished := buildServerFinished(suite, masterSecret, tr.Sum())
 	srvLayer.WriteRecord(record.ContentTypeHandshake, serverFinished) //nolint:errcheck
 
 	return res
 }
 
+// parseCertVerifyBody extracts the signature algorithm and signature from a raw
+// CertificateVerify handshake envelope (4-byte header + body).
+func parseCertVerifyBody(res *clientAuthServerResult, envelope []byte) {
+	if len(envelope) < 4 {
+		return
+	}
+
+	bodyLen := uint32(envelope[1])<<16 | uint32(envelope[2])<<8 | uint32(envelope[3])
+	cvBody := envelope[4 : 4+bodyLen]
+
+	if len(cvBody) < 4 {
+		return
+	}
+
+	sigLen := int(cvBody[2])<<8 | int(cvBody[3])
+	if len(cvBody) < 4+sigLen {
+		return
+	}
+
+	res.cvAlg = [2]uint8{cvBody[0], cvBody[1]}
+	res.cvSig = append([]byte(nil), cvBody[4:4+sigLen]...)
+}
+
 // ============================================================================
 // Tests
-// ============================================================================
+// ============================================================================.
 
 // TestClient_Handshake_WithCertAuth_RSACert tests that when the server sends a
 // CertificateRequest and the client has an RSA cert configured, the client
 // emits Certificate + CKE + CertificateVerify and the handshake succeeds.
 func TestClient_Handshake_WithCertAuth_RSACert(t *testing.T) {
+	t.Parallel()
 	initTestFixtures(t)
 
 	clientKey, clientDER, _ := newTestClientRSACert(t)
@@ -254,15 +296,18 @@ func TestClient_Handshake_WithCertAuth_RSACert(t *testing.T) {
 	}
 
 	clientConn, serverConn := net.Pipe()
-	defer clientConn.Close()
-	defer serverConn.Close()
+	defer func() { _ = clientConn.Close() }()
+	defer func() { _ = serverConn.Close() }()
 
 	var serverRandom [32]byte
+
 	serverRandom[0] = 0xCC
 
 	resCh := make(chan clientAuthServerResult, 1)
+
 	go func() {
-		defer serverConn.Close()
+		defer func() { _ = serverConn.Close() }()
+
 		res := runServerWithCertReq(t, serverConn, suite, serverRandom, [][2]uint8{{0x04, 0x01}})
 		resCh <- res
 	}()
@@ -275,6 +320,7 @@ func TestClient_Handshake_WithCertAuth_RSACert(t *testing.T) {
 		},
 	}
 	tlsConn := gostls.NewConn(clientConn, config)
+
 	if err := tlsConn.Handshake(); err != nil {
 		t.Fatalf("handshake failed: %v", err)
 	}
@@ -283,9 +329,11 @@ func TestClient_Handshake_WithCertAuth_RSACert(t *testing.T) {
 	if res.err != nil {
 		t.Fatalf("server error: %v", res.err)
 	}
+
 	if !res.certVerifySeen {
 		t.Error("expected CertificateVerify, not observed")
 	}
+
 	t.Log("RSA client cert auth handshake succeeded")
 }
 
@@ -293,6 +341,7 @@ func TestClient_Handshake_WithCertAuth_RSACert(t *testing.T) {
 // CertificateRequest but the client has no cert, the client sends an empty
 // Certificate and no CertificateVerify.
 func TestClient_Handshake_WithCertAuth_NoCert(t *testing.T) {
+	t.Parallel()
 	initTestFixtures(t)
 
 	suite, ok := suites.LookupByName("AES128-SHA256")
@@ -301,15 +350,18 @@ func TestClient_Handshake_WithCertAuth_NoCert(t *testing.T) {
 	}
 
 	clientConn, serverConn := net.Pipe()
-	defer clientConn.Close()
-	defer serverConn.Close()
+	defer func() { _ = clientConn.Close() }()
+	defer func() { _ = serverConn.Close() }()
 
 	var serverRandom [32]byte
+
 	serverRandom[0] = 0xDD
 
 	resCh := make(chan clientAuthServerResult, 1)
+
 	go func() {
-		defer serverConn.Close()
+		defer func() { _ = serverConn.Close() }()
+
 		res := runServerWithCertReq(t, serverConn, suite, serverRandom, [][2]uint8{{0x04, 0x01}})
 		resCh <- res
 	}()
@@ -320,6 +372,7 @@ func TestClient_Handshake_WithCertAuth_NoCert(t *testing.T) {
 		Certificates: nil,
 	}
 	tlsConn := gostls.NewConn(clientConn, config)
+
 	if err := tlsConn.Handshake(); err != nil {
 		t.Fatalf("handshake failed: %v", err)
 	}
@@ -328,9 +381,11 @@ func TestClient_Handshake_WithCertAuth_NoCert(t *testing.T) {
 	if res.err != nil {
 		t.Fatalf("server error: %v", res.err)
 	}
+
 	if res.certVerifySeen {
 		t.Error("expected no CertificateVerify when no client cert configured")
 	}
+
 	t.Log("Empty client cert handshake succeeded")
 }
 
@@ -338,6 +393,7 @@ func TestClient_Handshake_WithCertAuth_NoCert(t *testing.T) {
 // send a CertificateRequest, the client does not send a Certificate or CertificateVerify
 // even if certs are configured (existing behavior preserved).
 func TestClient_Handshake_NoCertReq_CertConfigured(t *testing.T) {
+	t.Parallel()
 	initTestFixtures(t)
 
 	clientKey, clientDER, _ := newTestClientRSACert(t)
@@ -348,19 +404,23 @@ func TestClient_Handshake_NoCertReq_CertConfigured(t *testing.T) {
 	}
 
 	clientConn, serverConn := net.Pipe()
-	defer clientConn.Close()
-	defer serverConn.Close()
+	defer func() { _ = clientConn.Close() }()
+	defer func() { _ = serverConn.Close() }()
 
 	var serverRandom [32]byte
+
 	serverRandom[0] = 0xEE
 
 	serverDone := make(chan error, 1)
+
 	go func() {
-		defer serverConn.Close()
+		defer func() { _ = serverConn.Close() }()
+
 		srv := newScriptedServer(t, serverConn)
 		runner := newServerRunner(t, srv, suite)
 		// runFullHandshake sends NO CertificateRequest — existing behavior.
 		runner.runFullHandshake(serverRandom)
+
 		serverDone <- nil
 	}()
 
@@ -372,6 +432,7 @@ func TestClient_Handshake_NoCertReq_CertConfigured(t *testing.T) {
 		},
 	}
 	tlsConn := gostls.NewConn(clientConn, config)
+
 	if err := tlsConn.Handshake(); err != nil {
 		t.Fatalf("handshake failed: %v", err)
 	}
@@ -379,6 +440,7 @@ func TestClient_Handshake_NoCertReq_CertConfigured(t *testing.T) {
 	if err := <-serverDone; err != nil {
 		t.Fatalf("server error: %v", err)
 	}
+
 	t.Log("No-CertReq with cert configured: existing behavior preserved")
 }
 
@@ -386,6 +448,7 @@ func TestClient_Handshake_NoCertReq_CertConfigured(t *testing.T) {
 // CertificateVerify signature is cryptographically correct: sha256+rsa over the
 // transcript through ClientKeyExchange.
 func TestClient_Handshake_WithCertAuth_VerifiesSignature(t *testing.T) {
+	t.Parallel()
 	initTestFixtures(t)
 
 	clientKey, clientDER, _ := newTestClientRSACert(t)
@@ -396,15 +459,18 @@ func TestClient_Handshake_WithCertAuth_VerifiesSignature(t *testing.T) {
 	}
 
 	clientConn, serverConn := net.Pipe()
-	defer clientConn.Close()
-	defer serverConn.Close()
+	defer func() { _ = clientConn.Close() }()
+	defer func() { _ = serverConn.Close() }()
 
 	var serverRandom [32]byte
+
 	serverRandom[0] = 0xAF
 
 	resCh := make(chan clientAuthServerResult, 1)
+
 	go func() {
-		defer serverConn.Close()
+		defer func() { _ = serverConn.Close() }()
+
 		res := runServerWithCertReq(t, serverConn, suite, serverRandom, [][2]uint8{{0x04, 0x01}})
 		resCh <- res
 	}()
@@ -417,6 +483,7 @@ func TestClient_Handshake_WithCertAuth_VerifiesSignature(t *testing.T) {
 		},
 	}
 	tlsConn := gostls.NewConn(clientConn, config)
+
 	if err := tlsConn.Handshake(); err != nil {
 		t.Fatalf("handshake failed: %v", err)
 	}
@@ -425,6 +492,7 @@ func TestClient_Handshake_WithCertAuth_VerifiesSignature(t *testing.T) {
 	if res.err != nil {
 		t.Fatalf("server error: %v", res.err)
 	}
+
 	if !res.certVerifySeen {
 		t.Fatal("CertificateVerify was not observed")
 	}
@@ -435,6 +503,7 @@ func TestClient_Handshake_WithCertAuth_VerifiesSignature(t *testing.T) {
 	if res.cvAlg[0] != 0x04 || res.cvAlg[1] != 0x01 {
 		t.Errorf("expected sha256+rsa {0x04,0x01}, got {0x%02x,0x%02x}", res.cvAlg[0], res.cvAlg[1])
 	}
+
 	// res.transcriptBeforeCV IS the digest (SHA256 of raw transcript bytes).
 	// RSA PKCS1v15 with SHA256 means: sign(SHA256(data)) where data = transcript.
 	// The client called rsa.SignPKCS1v15(rand, key, crypto.SHA256, digest) where
@@ -449,13 +518,15 @@ func TestClient_Handshake_WithCertAuth_VerifiesSignature(t *testing.T) {
 // TestClient_Config_ClientCerts_InvalidKeyType tests that clientCerts() returns
 // a hard error for unsupported key types, surfaced at handshake start.
 func TestClient_Config_ClientCerts_InvalidKeyType(t *testing.T) {
+	t.Parallel()
+
 	// Use an interface{} wrapping a string as a fake key — unsupported type.
 	type fakeKey struct{}
 
 	config := &gostls.Config{
 		Certificates: []gostls.Certificate{
 			{
-				RawCertificate: []byte{0x01}, // non-empty but invalid DER (won't be parsed for this test)
+				RawCertificate: []byte{0x01}, // non-empty but invalid DER (won't be parsed for this test).
 				PrivateKey:     fakeKey{},
 			},
 		},
@@ -464,27 +535,32 @@ func TestClient_Config_ClientCerts_InvalidKeyType(t *testing.T) {
 
 	// Connect to a dummy server that will never be reached.
 	clientConn, serverConn := net.Pipe()
-	defer clientConn.Close()
-	defer serverConn.Close()
+	defer func() { _ = clientConn.Close() }()
+	defer func() { _ = serverConn.Close() }()
 
 	// Server just drains and closes.
 	go func() {
 		buf := make([]byte, 1024)
 		serverConn.Read(buf) //nolint:errcheck
-		serverConn.Close()
+
+		_ = serverConn.Close()
 	}()
 
 	tlsConn := gostls.NewConn(clientConn, config)
+
 	err := tlsConn.Handshake()
 	if err == nil {
 		t.Fatal("expected error for unsupported key type, got nil")
 	}
+
 	t.Logf("correctly rejected unsupported key type: %v", err)
 }
 
 // TestClient_Config_ClientCerts_EmptyRawCertificate tests that empty
 // RawCertificate (with no Certificate set) is a hard error.
 func TestClient_Config_ClientCerts_EmptyRawCertificate(t *testing.T) {
+	t.Parallel()
+
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatalf("gen key: %v", err)
@@ -493,7 +569,7 @@ func TestClient_Config_ClientCerts_EmptyRawCertificate(t *testing.T) {
 	config := &gostls.Config{
 		Certificates: []gostls.Certificate{
 			{
-				RawCertificate: nil, // empty — hard error
+				RawCertificate: nil, // empty — hard error.
 				PrivateKey:     key,
 			},
 		},
@@ -501,20 +577,23 @@ func TestClient_Config_ClientCerts_EmptyRawCertificate(t *testing.T) {
 	}
 
 	clientConn, serverConn := net.Pipe()
-	defer clientConn.Close()
-	defer serverConn.Close()
+	defer func() { _ = clientConn.Close() }()
+	defer func() { _ = serverConn.Close() }()
 
 	go func() {
 		buf := make([]byte, 1024)
 		serverConn.Read(buf) //nolint:errcheck
-		serverConn.Close()
+
+		_ = serverConn.Close()
 	}()
 
 	tlsConn := gostls.NewConn(clientConn, config)
+
 	err = tlsConn.Handshake()
 	if err == nil {
 		t.Fatal("expected error for empty RawCertificate, got nil")
 	}
+
 	t.Logf("correctly rejected empty RawCertificate: %v", err)
 }
 
@@ -525,6 +604,8 @@ func TestClient_Config_ClientCerts_EmptyRawCertificate(t *testing.T) {
 // clientCerts() must still reject — validation cannot be skipped when
 // Certificate is non-nil.
 func TestClient_Config_ClientCerts_EmptyRawCertificate_WithParsedCertificate(t *testing.T) {
+	t.Parallel()
+
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatalf("gen key: %v", err)
@@ -539,10 +620,12 @@ func TestClient_Config_ClientCerts_EmptyRawCertificate_WithParsedCertificate(t *
 		NotBefore:    time.Now(),
 		NotAfter:     time.Now().Add(time.Hour),
 	}
+
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
 		t.Fatalf("create cert: %v", err)
 	}
+
 	parsed, err := x509.ParseCertificate(der)
 	if err != nil {
 		t.Fatalf("parse cert: %v", err)
@@ -551,8 +634,8 @@ func TestClient_Config_ClientCerts_EmptyRawCertificate_WithParsedCertificate(t *
 	config := &gostls.Config{
 		Certificates: []gostls.Certificate{
 			{
-				Certificate:    parsed, // pre-parsed, non-nil
-				RawCertificate: nil,    // but DER bytes missing — hard error
+				Certificate:    parsed, // pre-parsed, non-nil.
+				RawCertificate: nil,    // but DER bytes missing — hard error.
 				PrivateKey:     key,
 			},
 		},
@@ -560,19 +643,22 @@ func TestClient_Config_ClientCerts_EmptyRawCertificate_WithParsedCertificate(t *
 	}
 
 	clientConn, serverConn := net.Pipe()
-	defer clientConn.Close()
-	defer serverConn.Close()
+	defer func() { _ = clientConn.Close() }()
+	defer func() { _ = serverConn.Close() }()
 
 	go func() {
 		buf := make([]byte, 1024)
 		serverConn.Read(buf) //nolint:errcheck
-		serverConn.Close()
+
+		_ = serverConn.Close()
 	}()
 
 	tlsConn := gostls.NewConn(clientConn, config)
+
 	err = tlsConn.Handshake()
 	if err == nil {
 		t.Fatal("expected error for empty RawCertificate with parsed Certificate, got nil")
 	}
+
 	t.Logf("correctly rejected empty RawCertificate + parsed Certificate: %v", err)
 }

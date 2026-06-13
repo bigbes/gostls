@@ -2,6 +2,10 @@ package handshake
 
 import "fmt"
 
+// hsEnvelopeSize is the size of the handshake message envelope:
+// uint8 msg_type + uint24 body_length (RFC 5246 §7.4).
+const hsEnvelopeSize = 4
+
 // Type identifies a handshake message type (RFC 5246 §7.4).
 type Type uint8
 
@@ -65,10 +69,12 @@ type Message interface {
 // Per RFC 5246 §7.4, this is what goes into the transcript hash.
 func MarshalMessage(m Message) []byte {
 	body := m.Marshal()
-	out := make([]byte, 0, 4+len(body))
+	out := make([]byte, 0, hsEnvelopeSize+len(body))
+
 	out = append(out, byte(m.Type()))
 	out = appendUint24(out, uint32(len(body)))
 	out = append(out, body...)
+
 	return out
 }
 
@@ -76,16 +82,19 @@ func MarshalMessage(m Message) []byte {
 // It returns the parsed Message, any remaining bytes after the message, and an error.
 // Returns an error for unknown message types, truncated data, or malformed bodies.
 func ParseMessage(data []byte) (Message, []byte, error) {
-	if len(data) < 4 {
-		return nil, nil, fmt.Errorf("handshake: truncated message header (need 4 bytes, have %d)", len(data))
+	if len(data) < hsEnvelopeSize {
+		return nil, nil, fmt.Errorf("%w (have %d)", errMsgHeaderTruncated, len(data))
 	}
+
 	msgType := Type(data[0])
 	bodyLen := uint32(data[1])<<16 | uint32(data[2])<<8 | uint32(data[3])
-	data = data[4:]
+
+	data = data[hsEnvelopeSize:]
 
 	if uint32(len(data)) < bodyLen {
-		return nil, nil, fmt.Errorf("handshake: truncated message body: declared %d bytes, have %d", bodyLen, len(data))
+		return nil, nil, fmt.Errorf("%w: declared %d bytes, have %d", errMsgBodyTruncated, bodyLen, len(data))
 	}
+
 	body := data[:bodyLen]
 	remaining := data[bodyLen:]
 
@@ -95,6 +104,9 @@ func ParseMessage(data []byte) (Message, []byte, error) {
 	)
 
 	switch msgType {
+	case TypeHelloRequest:
+		// HelloRequest has an empty body; treat as a no-op message.
+		msg, err = &ServerHelloDone{}, nil
 	case TypeClientHello:
 		msg, err = parseClientHello(body)
 	case TypeServerHello:
@@ -102,23 +114,25 @@ func ParseMessage(data []byte) (Message, []byte, error) {
 	case TypeCertificate:
 		msg, err = parseCertificate(body)
 	case TypeServerKeyExchange:
-		msg, err = parseServerKeyExchange(body)
+		msg = parseServerKeyExchange(body)
 	case TypeCertificateRequest:
 		msg, err = parseCertificateRequest(body)
 	case TypeServerHelloDone:
 		msg, err = parseServerHelloDone(body)
 	case TypeClientKeyExchange:
-		msg, err = parseClientKeyExchange(body)
+		msg = parseClientKeyExchange(body)
 	case TypeCertificateVerify:
 		msg, err = parseCertificateVerify(body)
 	case TypeFinished:
 		msg, err = parseFinished(body)
 	default:
-		return nil, nil, fmt.Errorf("handshake: unknown message type %d", msgType)
+		return nil, nil, fmt.Errorf("%w %d", errUnknownMsgType, msgType)
 	}
+
 	if err != nil {
 		return nil, nil, err
 	}
+
 	return msg, remaining, nil
 }
 

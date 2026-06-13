@@ -19,10 +19,46 @@ package ke
 
 import (
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 
 	gost "github.com/bigbes/gostcrypto"
+)
+
+// GOST 2018 key exchange size constants.
+const (
+	// gost2018RandomsLen is the required length of clientRandom || serverRandom.
+	gost2018RandomsLen = 64
+
+	// gost2018Streebog256Len is the expected output length of Streebog-256.
+	gost2018Streebog256Len = 32
+
+	// gost2018UKMLen is the length of the UKM for fallback random generation.
+	gost2018UKMLen = 32
+
+	// gost2018PreMasterLen is the length of the pre-master secret.
+	gost2018PreMasterLen = 32
+
+	// gost2018IVKuznyechik is the IV length for Kuznyechik variant.
+	gost2018IVKuznyechik = 8
+
+	// gost2018IVMagma is the IV length for Magma variant.
+	gost2018IVMagma = 4
+
+	// gost2018UKMIVOffset is the offset within the UKM where the IV starts.
+	// IV = ukm[gost2018UKMIVOffset : gost2018UKMIVOffset+ivLen].
+	gost2018UKMIVOffset = 24
+)
+
+// Sentinel errors for GOST 2018 key exchange validation.
+var (
+	errGost2018CurveRequired     = errors.New("ke/gost2018: curve is required")
+	errGost2018SpkiAlgoRequired  = errors.New("ke/gost2018: spkiAlgo is required")
+	errGost2018ServerPubRequired = errors.New("ke/gost2018: serverPubRaw is required")
+	errGost2018UnknownVariant    = errors.New("ke/gost2018: unknown variant")
+	errGost2018RandomsLen        = errors.New("ke/gost2018: randoms must be 64 bytes (clientRandom || serverRandom)")
+	errGost2018Streebog256Len    = errors.New("ke/gost2018: unexpected Streebog-256 output length")
 )
 
 // Gost2018Variant selects the block cipher used for kexp15 key transport.
@@ -56,9 +92,9 @@ func kexpVariant(v Gost2018Variant) gost.KexpVariant {
 func ivLen(v Gost2018Variant) int {
 	switch v {
 	case Variant2018Kuznyechik:
-		return 8
+		return gost2018IVKuznyechik
 	case Variant2018Magma:
-		return 4
+		return gost2018IVMagma
 	default:
 		panic(fmt.Sprintf("ke/gost2018: unknown Gost2018Variant %d", v))
 	}
@@ -73,15 +109,15 @@ func ivLen(v Gost2018Variant) int {
 // PSKeyTransport_gost ASN.1 structure (tmp/engine/gost_asn1.c:70-76).
 type Gost2018Exchange struct {
 	curve        *gost.Curve
-	spkiAlgo     []byte // server cert SPKI AlgorithmIdentifier DER (reused verbatim)
-	serverPubRaw []byte // server cert public key (LE Y || LE X, 64 bytes)
+	spkiAlgo     []byte // server cert SPKI AlgorithmIdentifier DER (reused verbatim).
+	serverPubRaw []byte // server cert public key (LE Y || LE X, 64 bytes).
 	variant      Gost2018Variant
 	// clientRandom || serverRandom (64 bytes total) — hashed with Streebog-256
 	// to produce the UKM. See comment on NewGost2018Exchange for the derivation
 	// rationale; empty means fall back to a random 32-byte UKM (not
 	// interoperable with OpenSSL servers, retained only for unit tests).
 	randoms []byte
-	rng     io.Reader // defaults to crypto/rand.Reader when nil
+	rng     io.Reader // defaults to crypto/rand.Reader when nil.
 }
 
 // NewGost2018Exchange creates a Gost2018Exchange ready to produce a CKE.
@@ -107,27 +143,34 @@ func NewGost2018Exchange(
 	randoms []byte,
 ) (*Gost2018Exchange, error) {
 	if curve == nil {
-		return nil, fmt.Errorf("ke/gost2018: curve is required")
+		return nil, fmt.Errorf("%w", errGost2018CurveRequired)
 	}
+
 	if len(spkiAlgo) == 0 {
-		return nil, fmt.Errorf("ke/gost2018: spkiAlgo is required")
+		return nil, fmt.Errorf("%w", errGost2018SpkiAlgoRequired)
 	}
+
 	if len(serverPubRaw) == 0 {
-		return nil, fmt.Errorf("ke/gost2018: serverPubRaw is required")
+		return nil, fmt.Errorf("%w", errGost2018ServerPubRequired)
 	}
+
 	if variant != Variant2018Kuznyechik && variant != Variant2018Magma {
-		return nil, fmt.Errorf("ke/gost2018: unknown variant %d", variant)
+		return nil, fmt.Errorf("ke/gost2018: unknown variant %d: %w", variant, errGost2018UnknownVariant)
 	}
-	if randoms != nil && len(randoms) != 64 {
-		return nil, fmt.Errorf("ke/gost2018: randoms must be 64 bytes (clientRandom || serverRandom), got %d", len(randoms))
+
+	if randoms != nil && len(randoms) != gost2018RandomsLen {
+		return nil, fmt.Errorf(
+			"ke/gost2018: randoms must be 64 bytes (clientRandom || serverRandom), got %d: %w",
+			len(randoms), errGost2018RandomsLen)
 	}
+
 	return &Gost2018Exchange{
 		curve:        curve,
 		spkiAlgo:     spkiAlgo,
 		serverPubRaw: serverPubRaw,
 		variant:      variant,
 		randoms:      randoms,
-		rng:          nil, // resolved to rand.Reader in ClientKeyExchange
+		rng:          nil, // resolved to rand.Reader in ClientKeyExchange.
 	}, nil
 }
 
@@ -155,14 +198,18 @@ func (e *Gost2018Exchange) ClientKeyExchange(_ []byte) (cke, preMaster []byte, e
 	// to a random UKM — callers from tests use only the round-trip helpers
 	// they control both sides of.
 	var ukm []byte
-	if len(e.randoms) == 64 {
+
+	if len(e.randoms) == gost2018RandomsLen {
 		d := gost.Streebog256(e.randoms)
-		if len(d) != 32 {
-			return nil, nil, fmt.Errorf("ke/gost2018: unexpected Streebog-256 output length %d", len(d))
+		if len(d) != gost2018Streebog256Len {
+			return nil, nil, fmt.Errorf(
+				"ke/gost2018: unexpected Streebog-256 output length %d: %w",
+				len(d), errGost2018Streebog256Len)
 		}
+
 		ukm = d
 	} else {
-		ukm = make([]byte, 32)
+		ukm = make([]byte, gost2018UKMLen)
 		if _, err = rng.Read(ukm); err != nil {
 			return nil, nil, fmt.Errorf("ke/gost2018: ukm rand: %w", err)
 		}
@@ -170,7 +217,7 @@ func (e *Gost2018Exchange) ClientKeyExchange(_ []byte) (cke, preMaster []byte, e
 
 	// Step 2: generate 32-byte random pre-master secret.
 	// tmp/engine/gost_ec_keyx.c:460-461: generate random session key.
-	preMaster = make([]byte, 32)
+	preMaster = make([]byte, gost2018PreMasterLen)
 	if _, err = rng.Read(preMaster); err != nil {
 		return nil, nil, fmt.Errorf("ke/gost2018: premaster rand: %w", err)
 	}
@@ -190,9 +237,9 @@ func (e *Gost2018Exchange) ClientKeyExchange(_ []byte) (cke, preMaster []byte, e
 		return nil, nil, fmt.Errorf("ke/gost2018: KEG2012_256: %w", err)
 	}
 
-	// Step 5: IV = ukm[24 : 24+ivLen].
+	// Step 5: IV = ukm[gost2018UKMIVOffset : gost2018UKMIVOffset+ivLen].
 	// tmp/engine/gost_ec_keyx.c:486: gost_kexp15(..., shared_ukm+24, iv_len, ...).
-	iv := ukm[24 : 24+ivLen(e.variant)]
+	iv := ukm[gost2018UKMIVOffset : gost2018UKMIVOffset+ivLen(e.variant)]
 
 	// Step 6: wrap pre-master via kexp15.
 	// tmp/engine/gost_ec_keyx.c:486-498: gost_kexp15(session_key, key_len,

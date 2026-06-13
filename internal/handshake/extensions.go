@@ -15,19 +15,40 @@ const (
 	extRenegotiationInfo    uint16 = 0xFF01
 )
 
+// Wire encoding widths.
+const (
+	sizeUint8  = 1 // one byte for uint8 fields.
+	sizeUint16 = 2 // two bytes for uint16 fields.
+	sizeUint24 = 3 // three bytes for uint24 fields.
+	sizeUint32 = 4 // four bytes for uint32 fields.
+
+	// sniMinEntry is the minimum number of bytes per server_name list entry:
+	// uint8 name_type + uint16 name_len.
+	sniMinEntry = sizeUint8 + sizeUint16
+
+	// extHeaderSize is the minimum extension header: uint16 type + uint16 body_len.
+	extHeaderSize = sizeUint16 + sizeUint16
+
+	// sniHostNameType is the RFC 6066 name type for host_name (0x00).
+	sniHostNameType = uint8(0x00)
+
+	// pairSize is the number of bytes per (hash, sig) pair in the sig_algs extension.
+	pairSize = 2
+)
+
 // parsedExtensions holds the decoded content of all recognized extensions.
 // Unknown extension types cause an error immediately (fail-fast).
 type parsedExtensions struct {
-	// server_name (0x0000)
+	// server_name (0x0000).
 	ServerName string
 
-	// supported_groups (0x000A)
+	// supported_groups (0x000A).
 	SupportedGroups []uint16
 
-	// ec_point_formats (0x000B)
+	// ec_point_formats (0x000B).
 	ECPointFormats []uint8
 
-	// signature_algorithms (0x000D)
+	// signature_algorithms (0x000D).
 	SignatureAlgorithms []SigAndHash
 
 	// extended_master_secret (0x0017) — present/absent flag only.
@@ -46,20 +67,28 @@ func parseExtensions(extData []byte) (parsedExtensions, error) {
 	var out parsedExtensions
 
 	for len(extData) > 0 {
-		if len(extData) < 4 {
-			return parsedExtensions{}, fmt.Errorf("handshake: truncated extension header (need 4 bytes, have %d)", len(extData))
+		if len(extData) < extHeaderSize {
+			return parsedExtensions{}, fmt.Errorf("%w, have %d", errExtHeaderTruncated, len(extData))
 		}
-		extType := binary.BigEndian.Uint16(extData[:2])
-		extLen := int(binary.BigEndian.Uint16(extData[2:4]))
-		extData = extData[4:]
+
+		extType := binary.BigEndian.Uint16(extData[:sizeUint16])
+		extLen := int(binary.BigEndian.Uint16(extData[sizeUint16:extHeaderSize]))
+
+		extData = extData[extHeaderSize:]
 
 		if len(extData) < extLen {
-			return parsedExtensions{}, fmt.Errorf("handshake: extension 0x%04x body truncated: declared %d bytes, have %d", extType, extLen, len(extData))
+			return parsedExtensions{}, fmt.Errorf(
+				"%w 0x%04x: declared %d bytes, have %d",
+				errExtBodyTruncated, extType, extLen, len(extData),
+			)
 		}
+
 		extBody := extData[:extLen]
+
 		extData = extData[extLen:]
 
 		var err error
+
 		switch extType {
 		case extServerName:
 			out.ServerName, err = parseServerName(extBody)
@@ -80,12 +109,14 @@ func parseExtensions(extData []byte) (parsedExtensions, error) {
 				out.RenegotiationInfo = true
 			}
 		default:
-			return parsedExtensions{}, fmt.Errorf("handshake: unknown extension 0x%04x", extType)
+			return parsedExtensions{}, fmt.Errorf("%w 0x%04x", errExtUnknown, extType)
 		}
+
 		if err != nil {
 			return parsedExtensions{}, err
 		}
 	}
+
 	return out, nil
 }
 
@@ -103,81 +134,105 @@ func parseServerName(b []byte) (string, error) {
 		// Empty ServerHello acknowledgement — valid per RFC 6066 §3.
 		return "", nil
 	}
-	if len(b) < 2 {
-		return "", fmt.Errorf("handshake: server_name: truncated list length")
+
+	if len(b) < sizeUint16 {
+		return "", errSNITruncatedListLen
 	}
-	listLen := int(binary.BigEndian.Uint16(b[:2]))
-	b = b[2:]
+
+	listLen := int(binary.BigEndian.Uint16(b[:sizeUint16]))
+
+	b = b[sizeUint16:]
+
 	if len(b) < listLen {
-		return "", fmt.Errorf("handshake: server_name: list length %d exceeds available %d bytes", listLen, len(b))
+		return "", fmt.Errorf("%w: %d exceeds available %d bytes", errSNIListLenExceeds, listLen, len(b))
 	}
+
 	list := b[:listLen]
 
 	var hostName string
+
 	for len(list) > 0 {
-		if len(list) < 3 {
-			return "", fmt.Errorf("handshake: server_name: truncated name entry")
+		if len(list) < sniMinEntry {
+			return "", errSNITruncatedEntry
 		}
+
 		nameType := list[0]
-		nameLen := int(binary.BigEndian.Uint16(list[1:3]))
-		list = list[3:]
+		nameLen := int(binary.BigEndian.Uint16(list[sizeUint8:sniMinEntry]))
+
+		list = list[sniMinEntry:]
 
 		if len(list) < nameLen {
-			return "", fmt.Errorf("handshake: server_name: host_name length %d exceeds list length %d", nameLen, len(list))
+			return "", fmt.Errorf("%w: %d exceeds list length %d", errSNINameLenExceeds, nameLen, len(list))
 		}
+
 		name := list[:nameLen]
+
 		list = list[nameLen:]
 
-		if nameType != 0x00 {
-			return "", fmt.Errorf("handshake: server_name: unsupported name_type 0x%02x (only host_name=0x00 is supported)", nameType)
+		if nameType != sniHostNameType {
+			return "", fmt.Errorf("%w: got 0x%02x", errSNIUnsupportedNameType, nameType)
 		}
+
 		hostName = string(name)
 	}
+
 	return hostName, nil
 }
 
 // marshalServerName encodes the server_name extension body for a single host name.
 func marshalServerName(name string) []byte {
 	nameBytes := []byte(name)
-	// Entry: uint8 type=0 + uint16 name_len + name.
-	entryLen := 1 + 2 + len(nameBytes)
-	out := make([]byte, 0, 2+entryLen)
+	// Entry: uint8 name_type + uint16 name_len + name.
+	entryLen := sniMinEntry + len(nameBytes)
+	out := make([]byte, 0, sizeUint16+entryLen)
+
 	out = appendUint16(out, uint16(entryLen))
-	out = appendUint8(out, 0x00) // host_name
+	out = appendUint8(out, sniHostNameType) // host_name.
 	out = appendUint16(out, uint16(len(nameBytes)))
 	out = append(out, nameBytes...)
+
 	return out
 }
 
 // parseSupportedGroups parses the supported_groups (elliptic_curves) extension body
 // (RFC 8422 §5.1.1). Format: uint16 list_length; uint16 curve_ids[].
 func parseSupportedGroups(b []byte) ([]uint16, error) {
-	if len(b) < 2 {
-		return nil, fmt.Errorf("handshake: supported_groups: truncated list length")
+	if len(b) < sizeUint16 {
+		return nil, errSGTruncatedListLen
 	}
-	listLen := int(binary.BigEndian.Uint16(b[:2]))
-	b = b[2:]
+
+	listLen := int(binary.BigEndian.Uint16(b[:sizeUint16]))
+
+	b = b[sizeUint16:]
+
 	if len(b) < listLen {
-		return nil, fmt.Errorf("handshake: supported_groups: list length %d exceeds available %d bytes", listLen, len(b))
+		return nil, fmt.Errorf("%w: %d exceeds available %d bytes", errSGListLenExceeds, listLen, len(b))
 	}
+
 	if listLen%2 != 0 {
-		return nil, fmt.Errorf("handshake: supported_groups: odd list length %d (must be even)", listLen)
+		return nil, fmt.Errorf("%w: %d", errSGOddListLen, listLen)
 	}
+
 	list := b[:listLen]
-	groups := make([]uint16, listLen/2)
+	groups := make([]uint16, listLen/pairSize)
+
 	for i := range groups {
-		groups[i] = binary.BigEndian.Uint16(list[2*i : 2*i+2])
+		groups[i] = binary.BigEndian.Uint16(list[pairSize*i : pairSize*i+pairSize])
 	}
+
 	return groups, nil
 }
 
 // marshalSupportedGroups encodes the supported_groups extension body.
 func marshalSupportedGroups(groups []uint16) []byte {
-	out := make([]byte, 0, 2+2*len(groups))
-	out = appendUint16(out, uint16(2*len(groups)))
+	out := make([]byte, 0, sizeUint16+pairSize*len(groups))
+
+	out = appendUint16(out, uint16(pairSize*len(groups)))
+
 	for _, g := range groups {
 		out = appendUint16(out, g)
 	}
+
 	return out
 }
 
@@ -185,54 +240,70 @@ func marshalSupportedGroups(groups []uint16) []byte {
 // Format: uint8 list_length; uint8 formats[].
 func parseECPointFormats(b []byte) ([]uint8, error) {
 	if len(b) < 1 {
-		return nil, fmt.Errorf("handshake: ec_point_formats: truncated list length")
+		return nil, errEPFTruncatedListLen
 	}
+
 	listLen := int(b[0])
+
 	b = b[1:]
+
 	if len(b) < listLen {
-		return nil, fmt.Errorf("handshake: ec_point_formats: list length %d exceeds available %d bytes", listLen, len(b))
+		return nil, fmt.Errorf("%w: %d exceeds available %d bytes", errEPFListLenExceeds, listLen, len(b))
 	}
+
 	return append([]uint8(nil), b[:listLen]...), nil
 }
 
 // marshalECPointFormats encodes the ec_point_formats extension body.
 func marshalECPointFormats(formats []uint8) []byte {
 	out := make([]byte, 0, 1+len(formats))
+
 	out = appendUint8(out, uint8(len(formats)))
 	out = append(out, formats...)
+
 	return out
 }
 
 // parseSignatureAlgorithms parses the signature_algorithms extension body
 // (RFC 5246 §7.4.1.4.1). Format: uint16 list_length; pairs of (hash, sig) uint8.
 func parseSignatureAlgorithms(b []byte) ([]SigAndHash, error) {
-	if len(b) < 2 {
-		return nil, fmt.Errorf("handshake: signature_algorithms: truncated list length")
+	if len(b) < sizeUint16 {
+		return nil, errSATruncatedListLen
 	}
-	listLen := int(binary.BigEndian.Uint16(b[:2]))
-	b = b[2:]
+
+	listLen := int(binary.BigEndian.Uint16(b[:sizeUint16]))
+
+	b = b[sizeUint16:]
+
 	if len(b) < listLen {
-		return nil, fmt.Errorf("handshake: signature_algorithms: list length %d exceeds available %d bytes", listLen, len(b))
+		return nil, fmt.Errorf("%w: %d exceeds available %d bytes", errSAListLenExceeds, listLen, len(b))
 	}
+
 	if listLen%2 != 0 {
-		return nil, fmt.Errorf("handshake: signature_algorithms: odd list length %d (must be even)", listLen)
+		return nil, fmt.Errorf("%w: %d", errSAOddListLen, listLen)
 	}
+
 	list := b[:listLen]
-	pairs := make([]SigAndHash, listLen/2)
+	pairs := make([]SigAndHash, listLen/pairSize)
+
 	for i := range pairs {
-		pairs[i] = SigAndHash{Hash: list[2*i], Sig: list[2*i+1]}
+		pairs[i] = SigAndHash{Hash: list[pairSize*i], Sig: list[pairSize*i+1]}
 	}
+
 	return pairs, nil
 }
 
 // marshalSignatureAlgorithms encodes the signature_algorithms extension body.
 func marshalSignatureAlgorithms(pairs []SigAndHash) []byte {
-	out := make([]byte, 0, 2+2*len(pairs))
-	out = appendUint16(out, uint16(2*len(pairs)))
+	out := make([]byte, 0, sizeUint16+pairSize*len(pairs))
+
+	out = appendUint16(out, uint16(pairSize*len(pairs)))
+
 	for _, p := range pairs {
 		out = appendUint8(out, p.Hash)
 		out = appendUint8(out, p.Sig)
 	}
+
 	return out
 }
 
@@ -240,8 +311,9 @@ func marshalSignatureAlgorithms(pairs []SigAndHash) []byte {
 // The extension has an empty body; any non-empty body is rejected.
 func parseExtendedMasterSecret(b []byte) error {
 	if len(b) != 0 {
-		return fmt.Errorf("handshake: extended_master_secret: expected empty body, got %d bytes", len(b))
+		return fmt.Errorf("%w, got %d bytes", errEMSNonEmptyBody, len(b))
 	}
+
 	return nil
 }
 
@@ -251,17 +323,22 @@ func parseExtendedMasterSecret(b []byte) error {
 // does not support.
 func parseRenegotiationInfo(b []byte) error {
 	if len(b) < 1 {
-		return fmt.Errorf("handshake: renegotiation_info: truncated body")
+		return errRITruncatedBody
 	}
+
 	// The body is: uint8 renegotiated_connection_length + renegotiated_connection.
 	riLen := int(b[0])
+
 	b = b[1:]
+
 	if len(b) < riLen {
-		return fmt.Errorf("handshake: renegotiation_info: declared %d bytes, have %d", riLen, len(b))
+		return fmt.Errorf("%w: declared %d bytes, have %d", errRIDeclaredLenExceeds, riLen, len(b))
 	}
+
 	if riLen != 0 {
-		return fmt.Errorf("handshake: renegotiation_info: non-empty renegotiated_connection (%d bytes); renegotiation is not supported", riLen)
+		return fmt.Errorf("%w (%d bytes)", errRINonEmpty, riLen)
 	}
+
 	return nil
 }
 
@@ -270,6 +347,7 @@ func appendExtension(dst []byte, extType uint16, body []byte) []byte {
 	dst = appendUint16(dst, extType)
 	dst = appendUint16(dst, uint16(len(body)))
 	dst = append(dst, body...)
+
 	return dst
 }
 
@@ -286,18 +364,26 @@ func marshalExtensions(ext parsedExtensions) []byte {
 	if ext.ServerName != "" {
 		extBytes = appendExtension(extBytes, extServerName, marshalServerName(ext.ServerName))
 	}
+
 	if len(ext.SupportedGroups) > 0 {
 		extBytes = appendExtension(extBytes, extSupportedGroups, marshalSupportedGroups(ext.SupportedGroups))
 	}
+
 	if len(ext.ECPointFormats) > 0 {
 		extBytes = appendExtension(extBytes, extECPointFormats, marshalECPointFormats(ext.ECPointFormats))
 	}
+
 	if len(ext.SignatureAlgorithms) > 0 {
-		extBytes = appendExtension(extBytes, extSignatureAlgorithms, marshalSignatureAlgorithms(ext.SignatureAlgorithms))
+		extBytes = appendExtension(
+			extBytes, extSignatureAlgorithms,
+			marshalSignatureAlgorithms(ext.SignatureAlgorithms),
+		)
 	}
+
 	if ext.ExtendedMasterSecret {
 		extBytes = appendExtension(extBytes, extExtendedMasterSecret, nil)
 	}
+
 	if ext.RenegotiationInfo {
 		// Body: uint8(0) — empty renegotiated_connection.
 		extBytes = appendExtension(extBytes, extRenegotiationInfo, []byte{0x00})
@@ -308,8 +394,10 @@ func marshalExtensions(ext parsedExtensions) []byte {
 	}
 
 	// Prepend the total extension list length.
-	out := make([]byte, 0, 2+len(extBytes))
+	out := make([]byte, 0, sizeUint16+len(extBytes))
+
 	out = appendUint16(out, uint16(len(extBytes)))
 	out = append(out, extBytes...)
+
 	return out
 }

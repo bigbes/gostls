@@ -36,6 +36,8 @@ func fakeFactory() hash.Hash { return &fakeHash{} }
 // chunks, Sum(sha256.New) returns the same digest as hashing the concatenation
 // from scratch.
 func TestTranscript_SumReplaysAllWrittenBytes(t *testing.T) {
+	t.Parallel()
+
 	tr := handshake.NewTranscript()
 
 	chunk1 := []byte("handshake message one")
@@ -49,12 +51,14 @@ func TestTranscript_SumReplaysAllWrittenBytes(t *testing.T) {
 	all := append(append(append([]byte{}, chunk1...), chunk2...), chunk3...)
 	h := sha256.New()
 	h.Write(all)
+
 	want := h.Sum(nil)
 
 	got, err := tr.Sum(sha256.New)
 	if err != nil {
 		t.Fatalf("Sum(sha256.New): unexpected error: %v", err)
 	}
+
 	if !bytes.Equal(got, want) {
 		t.Errorf("SHA-256 digest mismatch:\n  got  %x\n  want %x", got, want)
 	}
@@ -64,6 +68,8 @@ func TestTranscript_SumReplaysAllWrittenBytes(t *testing.T) {
 // to Sum with different factories on the same transcript both return correct
 // digests, with no order dependency and no Collapse call anywhere.
 func TestTranscript_SumWithFactoryIndependentOfSuite(t *testing.T) {
+	t.Parallel()
+
 	tr := handshake.NewTranscript()
 
 	chunk1 := []byte("alpha bytes")
@@ -78,16 +84,19 @@ func TestTranscript_SumWithFactoryIndependentOfSuite(t *testing.T) {
 
 	h256 := sha256.New()
 	h256.Write(all)
+
 	want256 := h256.Sum(nil)
 
 	h384 := sha512.New384()
 	h384.Write(all)
+
 	want384 := h384.Sum(nil)
 
 	got256, err := tr.Sum(sha256.New)
 	if err != nil {
 		t.Fatalf("Sum(sha256.New): %v", err)
 	}
+
 	if !bytes.Equal(got256, want256) {
 		t.Errorf("SHA-256 mismatch:\n  got  %x\n  want %x", got256, want256)
 	}
@@ -96,6 +105,7 @@ func TestTranscript_SumWithFactoryIndependentOfSuite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sum(sha512.New384): %v", err)
 	}
+
 	if !bytes.Equal(got384, want384) {
 		t.Errorf("SHA-384 mismatch:\n  got  %x\n  want %x", got384, want384)
 	}
@@ -105,6 +115,7 @@ func TestTranscript_SumWithFactoryIndependentOfSuite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sum(sha512.New384) second call: %v", err)
 	}
+
 	if !bytes.Equal(got384b, want384) {
 		t.Errorf("SHA-384 second call mismatch:\n  got  %x\n  want %x", got384b, want384)
 	}
@@ -118,6 +129,8 @@ func TestTranscript_SumWithFactoryIndependentOfSuite(t *testing.T) {
 // Under the new buffer-and-replay design, the factory passed to Sum is what
 // determines the result: tr.Sum(sha256.New) ≠ tr.Sum(fakeFactory).
 func TestTranscript_ShapeCollidingFactoriesProduceDistinctDigests(t *testing.T) {
+	t.Parallel()
+
 	tr := handshake.NewTranscript()
 
 	tr.Write([]byte("some transcript bytes"))
@@ -148,6 +161,8 @@ func TestTranscript_ShapeCollidingFactoriesProduceDistinctDigests(t *testing.T) 
 // TestTranscript_SumNilFactoryErrors verifies that Sum(nil) returns a non-nil
 // error and does not panic.
 func TestTranscript_SumNilFactoryErrors(t *testing.T) {
+	t.Parallel()
+
 	tr := handshake.NewTranscript()
 	tr.Write([]byte("some bytes"))
 

@@ -19,7 +19,7 @@ import (
 func buildGOSTExchange(c *ClientState) (ke.Exchange, error) {
 	gc, ok := c.gostLeaf.(*x509gost.Certificate)
 	if !ok || gc == nil {
-		return nil, fmt.Errorf("tls: GOST key exchange requires a GOST server certificate (got %T)", c.gostLeaf)
+		return nil, fmt.Errorf("%w (got %T)", errGOSTNeedGOSTCert, c.gostLeaf)
 	}
 
 	curve, err := gost.CurveByOID(gc.CurveOID)
@@ -37,8 +37,11 @@ func buildGOSTExchange(c *ClientState) (ke.Exchange, error) {
 		return ke.NewVKOGost2012_256Exchange(curve, gc.SPKIAlgorithmDER, pubRaw, ukm)
 	case suites.KexGOST2018_256:
 		return buildGOST2018Exchange(c)
+	case suites.KexRSA, suites.KexDHE, suites.KexECDHE:
+		// Non-GOST KX kinds; not reachable in this function (caller guards).
+		fallthrough
 	default:
-		return nil, fmt.Errorf("tls: unexpected GOST KX kind %d", c.suite.KX)
+		return nil, fmt.Errorf("%w %d", errGOSTUnexpectedKXKind, c.suite.KX)
 	}
 }
 
@@ -54,7 +57,7 @@ func buildGOSTExchange(c *ClientState) (ke.Exchange, error) {
 func buildGOST2018Exchange(c *ClientState) (ke.Exchange, error) {
 	gc, ok := c.gostLeaf.(*x509gost.Certificate)
 	if !ok || gc == nil {
-		return nil, fmt.Errorf("tls: GOST 2018 key exchange requires a GOST server certificate (got %T)", c.gostLeaf)
+		return nil, fmt.Errorf("%w (got %T)", errGOST2018NeedGOSTCert, c.gostLeaf)
 	}
 
 	curve, err := gost.CurveByOID(gc.CurveOID)
@@ -65,14 +68,20 @@ func buildGOST2018Exchange(c *ClientState) (ke.Exchange, error) {
 	// Determine kexp15 variant from suite ID (RFC 9367):
 	//   0xC100 → Kuznyechik (128-bit block, iv_len=8)
 	//   0xC101 → Magma (64-bit block, iv_len=4)
+	const (
+		suiteIDKuznyechik = 0xC100
+		suiteIDMagma      = 0xC101
+	)
+
 	var variant ke.Gost2018Variant
+
 	switch c.suite.ID {
-	case 0xC100:
+	case suiteIDKuznyechik:
 		variant = ke.Variant2018Kuznyechik
-	case 0xC101:
+	case suiteIDMagma:
 		variant = ke.Variant2018Magma
 	default:
-		return nil, fmt.Errorf("tls: GOST 2018 key exchange: unexpected suite ID 0x%04X", c.suite.ID)
+		return nil, fmt.Errorf("%w 0x%04X", errGOST2018UnexpectedID, c.suite.ID)
 	}
 
 	// UKM = Streebog-256(clientRandom || serverRandom) per
@@ -80,7 +89,9 @@ func buildGOST2018Exchange(c *ClientState) (ke.Exchange, error) {
 	// the same UKM independently; the `ukm` octet string in the wire
 	// PSKeyTransport_gost is informational (the server ignores it in favour
 	// of its own hash-derived UKM).
-	randoms := make([]byte, 64)
+	const randomsLen = 64
+
+	randoms := make([]byte, randomsLen)
 	copy(randoms[:32], c.clientRandom[:])
 	copy(randoms[32:], c.serverRandom[:])
 

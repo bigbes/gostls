@@ -22,6 +22,44 @@ import (
 	gost "github.com/bigbes/gostcrypto"
 )
 
+// ---- GOST suite ID constants -------------------------------------------------.
+
+const (
+	// suiteGOST2001 is TLS_GOSTR341094_WITH_28147_CNT_IMIT (draft-chudov-cryptopro-cptls).
+	suiteGOST2001 uint16 = 0x0081
+	// suiteGOST2012Primary is GOST2012-GOST8912-GOST8912 (OpenSSL gost-engine private-use ID).
+	suiteGOST2012Primary uint16 = 0xFF85
+	// suiteGOST2012IANAAlias is TLS_GOSTR341112_256_WITH_28147_CNT_IMIT (draft-smyshlyaev).
+	suiteGOST2012IANAAlias uint16 = 0xC102
+	// suiteGOSTKuznyechik is GOST2012-KUZNYECHIK-KUZNYECHIKOMAC (RFC 9367).
+	suiteGOSTKuznyechik uint16 = 0xC100
+	// suiteGOSTMagma is GOST2012-MAGMA-MAGMAOMAC (RFC 9367).
+	suiteGOSTMagma uint16 = 0xC101
+)
+
+// ---- GOST cipher/MAC size constants -----------------------------------------.
+
+const (
+	// gost28147KeyLen is the GOST 28147-89 key length (32 bytes).
+	gost28147KeyLen = 32
+	// gost28147IVLen is the GOST 28147-89 IV length (one 64-bit block).
+	gost28147IVLen = 8
+	// gostIMITMACLen is the truncated GOST 28147-89 IMIT MAC length (RFC 9189 §4.2).
+	gostIMITMACLen = 4
+	// kuznyechikKeyLen is the Kuznyechik key length (32 bytes).
+	kuznyechikKeyLen = 32
+	// kuznyechikIVLen is the Kuznyechik implicit IV length from key block (8 bytes per RFC 9367).
+	kuznyechikIVLen = 8
+	// kuznyechikOMACLen is the full Kuznyechik OMAC tag length (one 128-bit block).
+	kuznyechikOMACLen = 16
+	// magmaKeyLen is the Magma key length (32 bytes).
+	magmaKeyLen = 32
+	// magmaIVLen is the Magma implicit IV length from key block (4 bytes per RFC 9367).
+	magmaIVLen = 4
+	// magmaOMACLen is the full Magma OMAC tag length (one 64-bit block).
+	magmaOMACLen = 8
+)
+
 func init() {
 	registerGOSTSuites()
 }
@@ -38,13 +76,13 @@ func init() {
 var specGOST28147CNT = CipherSpec{
 	Name: "GOST28147-CNT",
 	// GOST 28147-89 key = 32 bytes.
-	KeyLen: 32,
+	KeyLen: gost28147KeyLen,
 	// FixedIVLen = 8: the implicit IV from the TLS key block (one GOST block).
 	// RFC 9189 §4.2: the IV is derived from the key block; no per-record IV is
 	// prepended to the record fragment. Reference: gost-engine EVP cipher
 	// Gost28147_89_cnt_cipher has OFB_MODE flag and iv_len=8
 	// (tmp/engine/gost_crypt.c:174-182).
-	FixedIVLen:    8,
+	FixedIVLen:    gost28147IVLen,
 	ExplicitIVLen: 0,
 	AEAD:          false,
 	TagLen:        0,
@@ -57,8 +95,8 @@ var specGOST28147CNT = CipherSpec{
 // Validated against Tarantool-EE 3.5.0 via TestTarantoolEE_Ping_GOST_Pure.
 var specGOST28147IMIT = MACSpec{
 	Hash:   gost28147IMITHashNew,
-	KeyLen: 32,
-	MACLen: 4,
+	KeyLen: gost28147KeyLen,
+	MACLen: gostIMITMACLen,
 }
 
 // gost28147IMITHashNew returns a hash.Hash for GOST 28147-89 IMIT.
@@ -106,11 +144,11 @@ func gost28147IMITHashNew() hash.Hash {
 // TagLen = 16: full Kuznyechik block (gost_omac.c:48-56).
 var specKuznyechikCTROMAC = CipherSpec{
 	Name:          "KUZNYECHIK-CTR-OMAC",
-	KeyLen:        32,
-	FixedIVLen:    8,
+	KeyLen:        kuznyechikKeyLen,
+	FixedIVLen:    kuznyechikIVLen,
 	ExplicitIVLen: 0,
 	AEAD:          false,
-	TagLen:        0, // non-AEAD — MAC length is MACSpec.MACLen
+	TagLen:        0, // non-AEAD — MAC length is MACSpec.MACLen.
 }
 
 // specKuznyechikOMAC: separate 32-byte MAC key per RFC 9367 / OpenSSL
@@ -118,14 +156,14 @@ var specKuznyechikCTROMAC = CipherSpec{
 // Kuznyechik-OMAC (a block-cipher MAC, not a hash) directly.
 var specKuznyechikOMAC = MACSpec{
 	Hash:   nil,
-	KeyLen: 32,
-	MACLen: 16,
+	KeyLen: kuznyechikKeyLen,
+	MACLen: kuznyechikOMACLen,
 }
 
 var specMagmaCTROMAC = CipherSpec{
 	Name:          "MAGMA-CTR-OMAC",
-	KeyLen:        32,
-	FixedIVLen:    4,
+	KeyLen:        magmaKeyLen,
+	FixedIVLen:    magmaIVLen,
 	ExplicitIVLen: 0,
 	AEAD:          false,
 	TagLen:        0,
@@ -133,11 +171,11 @@ var specMagmaCTROMAC = CipherSpec{
 
 var specMagmaOMAC = MACSpec{
 	Hash:   nil,
-	KeyLen: 32,
-	MACLen: 8,
+	KeyLen: magmaKeyLen,
+	MACLen: magmaOMACLen,
 }
 
-// ---- PRF specs for GOST suites -----------------------------------------------
+// ---- PRF specs for GOST suites -----------------------------------------------.
 
 // GOST R 34.11-94 PRF: used by GOST2001-GOST89-GOST89.
 // RFC 9189 §4 specifies Streebog-256 for both suites, but older drafts
@@ -153,7 +191,7 @@ var specPRFStreebog256 = PRFSpec{
 	Hash: gost.NewStreebog256Hash,
 }
 
-// ---- Suite registrations -------------------------------------------------------
+// ---- Suite registrations -------------------------------------------------------.
 
 func registerGOSTSuites() {
 	// Suite 0x0081: GOST2001-GOST89-GOST89
@@ -167,7 +205,7 @@ func registerGOSTSuites() {
 	// MAC: GOST 28147-89 IMIT, 4-byte output.
 	// PRF: HMAC-GOSTR341194 (CryptoPro param set).
 	register(&Suite{
-		ID:     0x0081,
+		ID:     suiteGOST2001,
 		Name:   "GOST2001-GOST89-GOST89",
 		KX:     KexGOST2001,
 		Auth:   AuthGOST2001,
@@ -189,7 +227,7 @@ func registerGOSTSuites() {
 	// MAC: GOST 28147-89 IMIT, 4-byte output.
 	// PRF: HMAC-Streebog-256 per RFC 9189 §4.
 	register(&Suite{
-		ID:     0xFF85,
+		ID:     suiteGOST2012Primary,
 		Name:   "GOST2012-GOST8912-GOST8912",
 		KX:     KexGOST2012_256,
 		Auth:   AuthGOST2012_256,
@@ -212,7 +250,7 @@ func registerGOSTSuites() {
 	// exists for forward compatibility with servers that migrate to the
 	// standardised ID.
 	register(&Suite{
-		ID:     0xC102,
+		ID:     suiteGOST2012IANAAlias,
 		Name:   "IANA-GOST2012-GOST8912-GOST8912",
 		KX:     KexGOST2012_256,
 		Auth:   AuthGOST2012_256,
@@ -227,7 +265,7 @@ func registerGOSTSuites() {
 	// KX: GOST 2018 key transport (RFC 9367) — structurally distinct from VKO 2012.
 	// `openssl ciphers -V 0xC100` reports Kx=GOST18, not Kx=GOST.
 	register(&Suite{
-		ID:     0xC100,
+		ID:     suiteGOSTKuznyechik,
 		Name:   "GOST2012-KUZNYECHIK-KUZNYECHIKOMAC",
 		KX:     KexGOST2018_256,
 		Auth:   AuthGOST2012_256,
@@ -242,7 +280,7 @@ func registerGOSTSuites() {
 	// KX: GOST 2018 key transport (RFC 9367) — structurally distinct from VKO 2012.
 	// `openssl ciphers -V 0xC101` reports Kx=GOST18, not Kx=GOST.
 	register(&Suite{
-		ID:     0xC101,
+		ID:     suiteGOSTMagma,
 		Name:   "GOST2012-MAGMA-MAGMAOMAC",
 		KX:     KexGOST2018_256,
 		Auth:   AuthGOST2012_256,
