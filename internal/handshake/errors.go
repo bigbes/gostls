@@ -9,6 +9,10 @@ import "errors"
 // Transcript.
 var errNilHashFactory = errors.New("handshake: transcript: nil hash factory")
 
+// errTranscriptOverflow is returned by Transcript.Sum once the accumulated
+// handshake bytes have exceeded maxTranscriptBytes (memory-exhaustion guard).
+var errTranscriptOverflow = errors.New("tls: handshake transcript exceeded maximum size")
+
 // ParseMessage / message envelope.
 var (
 	errMsgHeaderTruncated = errors.New("handshake: truncated message header (need 4 bytes)")

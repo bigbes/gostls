@@ -171,3 +171,43 @@ func TestTranscript_SumNilFactoryErrors(t *testing.T) {
 		t.Fatalf("Sum(nil) returned nil error; want non-nil error. result=%x", result)
 	}
 }
+
+// TestTranscript_OverflowFailsClosed verifies the memory-exhaustion guard: once
+// more than the cap is written, the transcript reports overflow and Sum fails
+// rather than returning a (truncated) digest.
+func TestTranscript_OverflowFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	tr := handshake.NewTranscript()
+
+	// Write 1 MiB in 64 KiB chunks — well past the internal cap.
+	chunk := make([]byte, 64*1024)
+	for range 16 {
+		tr.Write(chunk)
+	}
+
+	if !tr.Overflowed() {
+		t.Fatal("Overflowed() = false after writing 1 MiB; want true")
+	}
+
+	if _, err := tr.Sum(sha256.New); err == nil {
+		t.Fatal("Sum after overflow returned nil error; want non-nil")
+	}
+}
+
+// TestTranscript_UnderCapStillWorks confirms a normal-sized transcript is
+// unaffected by the cap.
+func TestTranscript_UnderCapStillWorks(t *testing.T) {
+	t.Parallel()
+
+	tr := handshake.NewTranscript()
+	tr.Write(make([]byte, 32*1024)) // far below the cap.
+
+	if tr.Overflowed() {
+		t.Fatal("Overflowed() = true for a 32 KiB transcript; want false")
+	}
+
+	if _, err := tr.Sum(sha256.New); err != nil {
+		t.Fatalf("Sum on under-cap transcript: unexpected error %v", err)
+	}
+}
