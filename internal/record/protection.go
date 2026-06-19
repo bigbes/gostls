@@ -120,7 +120,7 @@ func macAdditionalData(seq uint64, hdr []byte, plainLen int) []byte {
 // Seal implements Protector. Returns IV || Encrypt(plain || mac || padding).
 // IV is randomly generated per record (RFC 5246 §6.2.3.2).
 func (p *cbcHMACProtector) Seal(seq uint64, hdr, plain []byte) ([]byte, error) {
-	mac := p.computeMAC(seq, hdr, plain)
+	mac := p.computeMAC(seq, hdr, plain, nil)
 
 	// TLS padding: enough bytes to align (plain || mac || pad) to blockSize.
 	// The last byte of padding encodes padding_length; all padding bytes have
@@ -163,11 +163,8 @@ func (p *cbcHMACProtector) Seal(seq uint64, hdr, plain []byte) ([]byte, error) {
 }
 
 // Open implements Protector. Input is IV (blockSize bytes) || ciphertext.
-//
-// Constant-time safety notes:
-//   - Padding is validated with a branchless XOR accumulator (Lucky13 mitigation).
-//   - MAC is verified with crypto/subtle.ConstantTimeCompare.
-//   - Even on bad padding we run the MAC comparison path to avoid timing divergence.
+// Padding removal and MAC verification are constant-time with respect to the
+// secret padding length; see the body for the Lucky13 mitigation.
 func (p *cbcHMACProtector) Open(seq uint64, hdr, fragment []byte) ([]byte, error) {
 	if len(fragment) < p.blockSize+p.macSize+1 {
 		return nil, NewFatalAlertError(AlertBadRecordMAC)
@@ -188,66 +185,106 @@ func (p *cbcHMACProtector) Open(seq uint64, hdr, fragment []byte) ([]byte, error
 	plain := make([]byte, len(ciphertext))
 	cipher.NewCBCDecrypter(block, iv).CryptBlocks(plain, ciphertext)
 
-	// Constant-time padding check.
-	// paddingLen is the value encoded in the last byte; that many preceding
-	// bytes must all equal the same value per RFC 5246 §6.2.3.2.
-	paddingLen := int(plain[len(plain)-1])
-	paddingStart := len(plain) - paddingLen - 1
+	// Constant-time padding removal and MAC verification (Lucky13 mitigation,
+	// mirroring crypto/tls). The padding length is secret, so the work below is
+	// independent of it:
+	//   - extractCBCPadding scans a fixed-size region and returns a 0xff/0x00
+	//     "good" mask without branching on the length;
+	//   - the bytes past the content+MAC (the padding) are fed to the HMAC as
+	//     post-digest "extra", so the number of hash-compression rounds, and
+	//     thus the MAC time, does not depend on the padding length;
+	//   - the MAC comparison and the padding check are combined into one
+	//     constant-time decision, so a padding failure is indistinguishable
+	//     from a MAC failure.
+	toRemove, paddingGood := extractCBCPadding(plain)
 
-	// Branchless accumulator: 1 = all padding bytes OK, 0 = any mismatch.
-	// We iterate over every byte in plain and check those in the padding region
-	// [paddingStart, len(plain)) without early exit to keep timing uniform.
-	// Formula per byte: if inPadding → require match; else → don't care (keep 1).
-	// Equivalent branchless form: paddingOK &= (1-inPadding) | (inPadding & match).
-	paddingOK := 1
-	if paddingStart < 0 {
-		paddingOK = 0
-	}
+	// Content length, clamped to >= 0 in constant time so the slices below stay
+	// in range even on bad padding (toRemove can exceed len(plain)-macSize).
+	rawN := len(plain) - p.macSize - toRemove
+	n := subtle.ConstantTimeSelect(int(uint32(rawN)>>cbcSignShift32), 0, rawN)
 
-	for i := range plain {
-		inPadding := subtle.ConstantTimeLessOrEq(paddingStart, i)
-		match := subtle.ConstantTimeByteEq(plain[i], plain[len(plain)-1])
+	gotMAC := plain[n : n+p.macSize]
+	expectedMAC := p.computeMAC(seq, hdr, plain[:n], plain[n+p.macSize:])
 
-		paddingOK &= (1 - inPadding) | (inPadding & match)
-	}
-
-	// Determine MAC boundaries. On bad padding or underflow we use nil/zero
-	// slices so computeMAC still runs (timing uniformity) but produces a
-	// different result than any valid MAC.
-	var (
-		msgPlain []byte
-		gotMAC   []byte
-	)
-
-	if paddingOK == 1 && paddingStart-p.macSize >= 0 {
-		msgPlain = plain[:paddingStart-p.macSize]
-		gotMAC = plain[paddingStart-p.macSize : paddingStart]
-	} else {
-		msgPlain = nil
-		gotMAC = make([]byte, p.macSize)
-	}
-
-	expectedMAC := p.computeMAC(seq, hdr, msgPlain)
-
-	macOK := subtle.ConstantTimeCompare(gotMAC, expectedMAC)
-	if paddingOK == 0 || macOK != 1 {
+	if subtle.ConstantTimeCompare(gotMAC, expectedMAC)&int(paddingGood) != 1 {
 		return nil, NewFatalAlertError(AlertBadRecordMAC)
 	}
 
-	out := make([]byte, len(msgPlain))
-	copy(out, msgPlain)
+	out := make([]byte, n)
+	copy(out, plain[:n])
 
 	return out, nil
 }
 
-// computeMAC computes HMAC over the additional data concatenated with the fragment.
-func (p *cbcHMACProtector) computeMAC(seq uint64, hdr, fragment []byte) []byte {
+// computeMAC computes HMAC over the additional data concatenated with fragment.
+// The returned MAC covers only fragment; extra, when non-nil, is written into
+// the HMAC *after* the digest is finalized, adding hash-compression rounds
+// without changing the result. The decrypt path passes the secret-length
+// padding region as extra so the total number of bytes hashed — and thus the
+// MAC computation time — is independent of the padding length (Lucky13
+// mitigation; mirrors crypto/tls tls10MAC).
+func (p *cbcHMACProtector) computeMAC(seq uint64, hdr, fragment, extra []byte) []byte {
 	h := hmac.New(p.newHash, p.macKey)
 	ad := macAdditionalData(seq, hdr, len(fragment))
 	h.Write(ad)
 	h.Write(fragment)
 
-	return h.Sum(nil)
+	res := h.Sum(nil)
+	if extra != nil {
+		h.Write(extra)
+	}
+
+	return res
+}
+
+// Constant-time bit-twiddling parameters for CBC padding validation.
+const (
+	// cbcMaxPaddingScan is the number of trailing bytes scanned when validating
+	// CBC padding: at most 255 padding bytes plus the length byte
+	// (RFC 5246 §6.2.3.2).
+	cbcMaxPaddingScan = 256
+	// cbcSignShift32 extracts an int32 sign bit as a full 0x00/0xFF byte mask.
+	cbcSignShift32 = 31
+	// cbcSignShift8 broadcasts a byte's most-significant bit across all 8 bits.
+	cbcSignShift8 = 7
+)
+
+// extractCBCPadding returns, in constant time, the number of trailing bytes to
+// remove (the padding bytes plus the length byte) and a mask equal to 0xff iff
+// the padding is well-formed per RFC 5246 §6.2.3.2. It mirrors the constant-time
+// padding check in crypto/tls (extractPadding): a fixed-size region is always
+// scanned, so neither the work done nor the control flow reveals the padding
+// length.
+func extractCBCPadding(payload []byte) (toRemove int, good byte) {
+	if len(payload) < 1 {
+		return 0, 0
+	}
+
+	paddingLen := payload[len(payload)-1]
+	t := uint(len(payload)-1) - uint(paddingLen)
+	// good is 0xff iff paddingLen <= len(payload)-1 (the MSB of t is then 0).
+	good = byte(int32(^t) >> cbcSignShift32)
+
+	// The padded length is public, so this bound is computed in the clear.
+	toCheck := min(cbcMaxPaddingScan, len(payload))
+
+	for i := range toCheck {
+		t := uint(paddingLen) - uint(i)
+		// mask is 0xff iff i <= paddingLen.
+		mask := byte(int32(^t) >> cbcSignShift32)
+		b := payload[len(payload)-1-i]
+
+		good &^= mask&paddingLen ^ mask&b
+	}
+
+	// Collapse the bits of good to all-ones or all-zeros: require every bit set.
+	good &= good << 4 //nolint:mnd // bit-fold step (4,2,1) to AND all 8 bits together
+	good &= good << 2 //nolint:mnd // bit-fold step
+	good &= good << 1
+
+	good = uint8(int8(good) >> cbcSignShift8)
+
+	return int(paddingLen) + 1, good
 }
 
 // ---- aeadProtector ---------------------------------------------------------.
