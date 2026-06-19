@@ -53,7 +53,23 @@ var clientSigAlgsAdvertised = []SigAndHash{
 	{Hash: sigHashSHA384, Sig: sigAlgRSA},   // rsa_pkcs1_sha384.
 	{Hash: sigHashByte, Sig: sigAlgECDSA},   // ecdsa_secp256r1_sha256.
 	{Hash: sigHashSHA384, Sig: sigAlgECDSA}, // ecdsa_secp384r1_sha384.
-	{Hash: sigHashSHA1, Sig: sigAlgRSA},     // rsa_pkcs1_sha1 (legacy fallback).
+	// SHA-1 is intentionally not offered: a SHA-1 server-authentication
+	// signature is vulnerable to collision attacks, and verifyServerKeyExchange
+	// rejects any algorithm not in this list (RFC 5246 §7.4.1.4.1).
+}
+
+// sigAlgAdvertised reports whether the (hash, sig) algorithm pair appears in
+// clientSigAlgsAdvertised, i.e. whether the client offered it in the ClientHello
+// signature_algorithms extension. Per RFC 5246 §7.4.1.4.1 / §7.4.3 the server's
+// ServerKeyExchange signature MUST use one of the algorithms the client offered.
+func sigAlgAdvertised(hashAlg, sigAlg uint8) bool {
+	for _, a := range clientSigAlgsAdvertised {
+		if a.Hash == hashAlg && a.Sig == sigAlg {
+			return true
+		}
+	}
+
+	return false
 }
 
 // availableCipherNames is the set of cipher names negotiable by the default
@@ -159,6 +175,11 @@ type ClientState struct {
 
 	// Set after handshake completes.
 	done bool
+
+	// hsBuf accumulates raw handshake-record payload bytes so readHandshakeRecord
+	// can reassemble a handshake message that spans multiple TLS records and
+	// de-frame multiple messages coalesced into one record (RFC 5246 §6.2.1).
+	hsBuf []byte
 }
 
 // NewClientState creates a new client handshake state machine.
@@ -283,6 +304,14 @@ func (c *ClientState) Handshake() error {
 	}
 
 	c.transcript.Write(clientFinishedEnv)
+
+	// No handshake bytes may straddle the ChangeCipherSpec boundary (RFC 5246
+	// §6.2.1: handshake messages must not be interleaved with other record
+	// types). If the server coalesced data after ServerHelloDone it is still
+	// buffered here, and reading the CCS directly would skip past it.
+	if len(c.hsBuf) != 0 {
+		return c.fatal(record.AlertUnexpectedMessage, errInterleavedHandshake)
+	}
 
 	// Step 11: receive server ChangeCipherSpec (straight-line: read one record).
 	recvCT, recvPayload, err := c.layer.ReadRecord()
@@ -439,11 +468,27 @@ func (c *ClientState) recvServerHello() error {
 			fmt.Errorf("%w %d", errNonNullCompression, sh.CompressionMethod))
 	}
 
-	// Server extensions must be a subset of what we offered or are expected.
-	// We allow: renegotiation_info (empty, RFC 5746).
-	// We did not offer extended_master_secret, so reject if server sends it.
+	// Server extensions must be a subset of what we offered (RFC 5246 §7.4.1.4).
+	// extended_master_secret is never offered; reject it with a specific error.
 	if sh.ExtendedMasterSecret {
 		return c.fatal(record.AlertUnsupportedExtension, errUnexpectedEMS)
+	}
+
+	offeredExt := map[uint16]bool{
+		extSupportedGroups:     true,
+		extECPointFormats:      true,
+		extSignatureAlgorithms: true,
+		extRenegotiationInfo:   true,
+	}
+	if c.params.ServerName != "" {
+		offeredExt[extServerName] = true
+	}
+
+	for _, extType := range sh.ExtensionTypes {
+		if !offeredExt[extType] {
+			return c.fatal(record.AlertUnsupportedExtension,
+				fmt.Errorf("%w 0x%04x", errSHUnofferedExt, extType))
+		}
 	}
 
 	c.serverRandom = sh.Random
@@ -483,7 +528,7 @@ func (c *ClientState) recvCertificate() (*x509.Certificate, *Certificate, error)
 	// Parse the leaf certificate and verify the chain. parseAndVerifyLeaf is
 	// x509gost-aware: GOST-signed certs are parsed/verified via x509gost, other
 	// certs fall back to stdlib x509.
-	leafCert, verifiedChains, err := parseAndVerifyLeaf(c, certMsg.RawCerts[0])
+	leafCert, verifiedChains, err := parseAndVerifyChain(c, certMsg.RawCerts)
 	if err != nil {
 		return nil, nil, c.fatal(record.AlertBadCertificate, fmt.Errorf("tls: %w", err))
 	}
@@ -687,6 +732,12 @@ func (c *ClientState) verifyECDHEServerKeyExchange(body []byte, cert *x509.Certi
 
 	sig := sigData[sigDataMin : sigDataMin+sigLen]
 
+	// The server MUST sign with an algorithm we advertised (RFC 5246 §7.4.1.4.1).
+	if !sigAlgAdvertised(hashAlg, sigAlg) {
+		return nil, c.fatal(record.AlertIllegalParameter,
+			fmt.Errorf("%w: hash=0x%02x sig=0x%02x", errSKEUnadvertisedSigAlg, hashAlg, sigAlg))
+	}
+
 	// Build signed data: clientRandom || serverRandom || curve_type || named_curve || point_len || point
 	// (RFC 4492 §5.4: the signature covers client_random + server_random + ServerECDHParams)
 	// ServerECDHParams is the entire params section: curve_type || named_curve || public.
@@ -759,6 +810,12 @@ func (c *ClientState) verifyDHEServerKeyExchange(body []byte, cert *x509.Certifi
 	}
 
 	sig := rest[sigSectionMin : sigSectionMin+sigLen]
+
+	// The server MUST sign with an algorithm we advertised (RFC 5246 §7.4.1.4.1).
+	if !sigAlgAdvertised(hashAlg, sigAlg) {
+		return nil, c.fatal(record.AlertIllegalParameter,
+			fmt.Errorf("%w: hash=0x%02x sig=0x%02x", errSKEUnadvertisedSigAlg, hashAlg, sigAlg))
+	}
 
 	// Signed data: clientRandom || serverRandom || ServerDHParams.
 	const twoRandoms = 32 + 32
@@ -1099,33 +1156,60 @@ func (c *ClientState) fatal(alertDesc uint8, cause error) error {
 	return cause
 }
 
-// readHandshakeRecord reads records until a handshake record is found.
-// Alert records are decoded and returned as errors.
+// maxHandshakeMsg bounds a single reassembled handshake message body. A
+// legitimate message (including a large certificate chain) fits comfortably; the
+// cap stops a peer from forcing unbounded buffering with an oversized declared
+// length. It matches the transcript accumulation bound.
+const maxHandshakeMsg = 256 * 1024
+
+// readHandshakeRecord returns the next complete handshake message. It reassembles
+// a message that spans multiple TLS records and de-frames multiple messages
+// coalesced into a single record (RFC 5246 §6.2.1), buffering raw handshake
+// bytes in c.hsBuf across calls. Alert records are decoded and returned as
+// errors; a non-handshake record arriving while a partial handshake message is
+// buffered is an interleaving violation.
 func (c *ClientState) readHandshakeRecord() (Type, []byte, error) {
+	const hsHdrLen = 4
+
 	for {
+		// Return a complete message that is already buffered.
+		if len(c.hsBuf) >= hsHdrLen {
+			bodyLen := uint32(c.hsBuf[1])<<16 | uint32(c.hsBuf[2])<<8 | uint32(c.hsBuf[3])
+			if bodyLen > maxHandshakeMsg {
+				return 0, nil, fmt.Errorf("%w: declared %d", errHSBodyTruncated, bodyLen)
+			}
+
+			total := hsHdrLen + int(bodyLen)
+			if len(c.hsBuf) >= total {
+				msgType := Type(c.hsBuf[0])
+				body := append([]byte(nil), c.hsBuf[hsHdrLen:total]...)
+
+				c.hsBuf = consumeBuffered(c.hsBuf, total)
+
+				return msgType, body, nil
+			}
+		}
+
+		// Otherwise read another record and append/handle it.
 		ct, payload, err := c.layer.ReadRecord()
 		if err != nil {
+			// A transport error or EOF while a partial message is buffered means
+			// the message was truncated.
+			if len(c.hsBuf) != 0 {
+				return 0, nil, fmt.Errorf("%w: %w", errHSBodyTruncated, err)
+			}
+
 			return 0, nil, err
 		}
 
 		switch ct {
 		case record.ContentTypeHandshake:
-			const hsHdrLen = 4
-
-			if len(payload) < hsHdrLen {
-				return 0, nil, fmt.Errorf("%w: %d bytes", errHSRecordTooShort, len(payload))
-			}
-
-			msgType := Type(payload[0])
-			bodyLen := uint32(payload[1])<<16 | uint32(payload[2])<<8 | uint32(payload[3])
-
-			if uint32(len(payload)) < hsHdrLen+bodyLen {
-				have := len(payload) - hsHdrLen
-				return 0, nil, fmt.Errorf("%w: declared %d, have %d", errHSBodyTruncated, bodyLen, have)
-			}
-
-			return msgType, payload[hsHdrLen : hsHdrLen+bodyLen], nil
+			c.hsBuf = append(c.hsBuf, payload...)
 		case record.ContentTypeAlert:
+			if len(c.hsBuf) != 0 {
+				return 0, nil, errInterleavedHandshake
+			}
+
 			const alertLen = 2
 
 			if len(payload) < alertLen {
@@ -1136,9 +1220,25 @@ func (c *ClientState) readHandshakeRecord() (Type, []byte, error) {
 
 			return 0, nil, fmt.Errorf("%w level=%d desc=%d", errAlertReceived, level, desc)
 		default:
+			if len(c.hsBuf) != 0 {
+				return 0, nil, errInterleavedHandshake
+			}
+
 			return 0, nil, fmt.Errorf("%w %d during handshake", errUnexpectedRecordType, ct)
 		}
 	}
+}
+
+// consumeBuffered drops the first n bytes of buf and returns the compacted
+// remainder as a fresh slice, so the consumed prefix is not retained and a
+// returned message body cannot alias subsequent appends. Returns nil when the
+// buffer is fully consumed.
+func consumeBuffered(buf []byte, n int) []byte {
+	if len(buf) == n {
+		return nil
+	}
+
+	return append([]byte(nil), buf[n:]...)
 }
 
 // buildEnvelope wraps a body with the 4-byte handshake envelope.

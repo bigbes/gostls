@@ -434,9 +434,12 @@ func TestParseAndVerifyLeaf_GOST_SelfSigned(t *testing.T) {
 		t.Error("leaf should be non-nil after GOST verification")
 	}
 
-	// GOST chain: parseAndVerifyLeaf surfaces nil chains on the GOST path.
-	if chains != nil {
-		t.Errorf("GOST path should return nil chains, got %v", chains)
+	// GOST chain: parseAndVerifyLeaf now surfaces the verified chain in stdlib
+	// shape so VerifyPeerCertificate receives a non-nil verifiedChains argument.
+	if len(chains) == 0 {
+		t.Error("GOST path should return a non-nil verified chain")
+	} else if len(chains[0]) == 0 || chains[0][0] == nil {
+		t.Error("GOST verified chain should contain the leaf certificate")
 	}
 
 	// gostLeaf must have been set because gc.HasGOSTPubKey is true for a GOST cert.

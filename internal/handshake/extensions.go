@@ -63,12 +63,14 @@ type parsedExtensions struct {
 // has already been stripped from the outer message).
 //
 // Any unrecognized extension type returns an error.
-func parseExtensions(extData []byte) (parsedExtensions, error) {
+func parseExtensions(extData []byte) (parsedExtensions, []uint16, error) {
 	var out parsedExtensions
+
+	var seen []uint16
 
 	for len(extData) > 0 {
 		if len(extData) < extHeaderSize {
-			return parsedExtensions{}, fmt.Errorf("%w, have %d", errExtHeaderTruncated, len(extData))
+			return parsedExtensions{}, nil, fmt.Errorf("%w, have %d", errExtHeaderTruncated, len(extData))
 		}
 
 		extType := binary.BigEndian.Uint16(extData[:sizeUint16])
@@ -77,7 +79,7 @@ func parseExtensions(extData []byte) (parsedExtensions, error) {
 		extData = extData[extHeaderSize:]
 
 		if len(extData) < extLen {
-			return parsedExtensions{}, fmt.Errorf(
+			return parsedExtensions{}, nil, fmt.Errorf(
 				"%w 0x%04x: declared %d bytes, have %d",
 				errExtBodyTruncated, extType, extLen, len(extData),
 			)
@@ -86,6 +88,8 @@ func parseExtensions(extData []byte) (parsedExtensions, error) {
 		extBody := extData[:extLen]
 
 		extData = extData[extLen:]
+
+		seen = append(seen, extType)
 
 		var err error
 
@@ -109,15 +113,15 @@ func parseExtensions(extData []byte) (parsedExtensions, error) {
 				out.RenegotiationInfo = true
 			}
 		default:
-			return parsedExtensions{}, fmt.Errorf("%w 0x%04x", errExtUnknown, extType)
+			return parsedExtensions{}, nil, fmt.Errorf("%w 0x%04x", errExtUnknown, extType)
 		}
 
 		if err != nil {
-			return parsedExtensions{}, err
+			return parsedExtensions{}, nil, err
 		}
 	}
 
-	return out, nil
+	return out, seen, nil
 }
 
 // parseServerName parses the server_name extension body (RFC 6066 §3).

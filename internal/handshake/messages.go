@@ -154,12 +154,16 @@ func parseClientHello(b []byte) (*ClientHello, error) {
 
 	// extensions (optional — present only if bytes remain).
 	if len(b) > 0 {
-		extList, _, err := readLenPrefixed16(b)
+		extList, rest, err := readLenPrefixed16(b)
 		if err != nil {
 			return nil, fmt.Errorf("handshake: ClientHello extensions: %w", err)
 		}
 
-		ext, err := parseExtensions(extList)
+		if len(rest) != 0 {
+			return nil, fmt.Errorf("%w: %d bytes", errCHTrailingData, len(rest))
+		}
+
+		ext, _, err := parseExtensions(extList)
 		if err != nil {
 			return nil, err
 		}
@@ -186,6 +190,11 @@ type ServerHello struct {
 	// Extensions.
 	ExtendedMasterSecret bool
 	RenegotiationInfo    bool
+
+	// ExtensionTypes lists the extension type codes present in the message, in
+	// the order received, so the caller can verify the server only returned
+	// extensions the client offered (RFC 5246 §7.4.1.4).
+	ExtensionTypes []uint16
 }
 
 func (m *ServerHello) Type() Type { return TypeServerHello }
@@ -267,18 +276,23 @@ func parseServerHello(b []byte) (*ServerHello, error) {
 	b = rest
 
 	if len(b) > 0 {
-		extList, _, err := readLenPrefixed16(b)
+		extList, rest, err := readLenPrefixed16(b)
 		if err != nil {
 			return nil, fmt.Errorf("handshake: ServerHello extensions: %w", err)
 		}
 
-		ext, err := parseExtensions(extList)
+		if len(rest) != 0 {
+			return nil, fmt.Errorf("%w: %d bytes", errSHTrailingData, len(rest))
+		}
+
+		ext, seen, err := parseExtensions(extList)
 		if err != nil {
 			return nil, err
 		}
 
 		m.ExtendedMasterSecret = ext.ExtendedMasterSecret
 		m.RenegotiationInfo = ext.RenegotiationInfo
+		m.ExtensionTypes = seen
 	}
 
 	return &m, nil
@@ -324,9 +338,13 @@ func parseCertificate(b []byte) (*Certificate, error) {
 	var m Certificate
 
 	// Outer 24-bit length prefix.
-	listBytes, _, err := readLenPrefixed24(b)
+	listBytes, rest, err := readLenPrefixed24(b)
 	if err != nil {
 		return nil, fmt.Errorf("handshake: Certificate list: %w", err)
+	}
+
+	if len(rest) != 0 {
+		return nil, fmt.Errorf("%w: %d bytes", errCertTrailingData, len(rest))
 	}
 
 	for len(listBytes) > 0 {

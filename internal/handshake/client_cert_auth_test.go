@@ -488,7 +488,7 @@ func TestSelectClientSigAlg_RSA_Server_SHA256_SHA384(t *testing.T) {
 	}
 
 	// Must be the first entry in clientSigAlgsAdvertised that the server also supports.
-	// Our ClientHello advertise list: {sha256+rsa, sha384+rsa, sha256+ecdsa, sha384+ecdsa, sha1+rsa}
+	// Our ClientHello advertise list: {sha256+rsa, sha384+rsa, sha256+ecdsa, sha384+ecdsa}
 	// Server has sha256+rsa and sha384+rsa; RSA key compatible with both.
 	// First advertised that server also has: sha256+rsa.
 	if alg.Hash != 0x04 || alg.Sig != 0x01 {

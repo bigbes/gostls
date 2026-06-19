@@ -39,6 +39,6 @@ func FuzzParseExtensions(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, extData []byte) {
 		// Contract: must not panic on any input.
-		_, _ = parseExtensions(extData)
+		_, _, _ = parseExtensions(extData)
 	})
 }

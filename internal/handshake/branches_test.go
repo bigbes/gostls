@@ -643,12 +643,14 @@ func TestExpandKeys_BuildSendProtectorFails(t *testing.T) {
 // readHandshakeRecord — payload too short (< 4 bytes, line 1107).
 // =============================================================================.
 
-// TestReadHandshakeRecord_PayloadTooShort exercises the errHSRecordTooShort
-// path in readHandshakeRecord: a handshake record with a 1-byte payload.
+// TestReadHandshakeRecord_PayloadTooShort feeds a lone 1-byte handshake fragment
+// (not even a full 4-byte header) followed by no further records. The reader
+// buffers it, tries to read more, hits EOF mid-message, and reports
+// errHSBodyTruncated.
 func TestReadHandshakeRecord_PayloadTooShort(t *testing.T) {
 	t.Parallel()
 
-	// Build a TLS record with ContentTypeHandshake and a 1-byte payload (need ≥ 4).
+	// A handshake record carrying a single byte — a partial handshake header.
 	rec := []byte{
 		record.ContentTypeHandshake,
 		0x03, 0x03, // TLS 1.2.
@@ -663,11 +665,11 @@ func TestReadHandshakeRecord_PayloadTooShort(t *testing.T) {
 
 	_, _, err := c.readHandshakeRecord()
 	if err == nil {
-		t.Fatal("readHandshakeRecord with 1-byte payload: expected error, got nil")
+		t.Fatal("readHandshakeRecord with 1-byte fragment: expected error, got nil")
 	}
 
-	if !errors.Is(err, errHSRecordTooShort) {
-		t.Errorf("expected errHSRecordTooShort, got %v", err)
+	if !errors.Is(err, errHSBodyTruncated) {
+		t.Errorf("expected errHSBodyTruncated, got %v", err)
 	}
 }
 

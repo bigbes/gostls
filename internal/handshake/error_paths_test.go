@@ -586,7 +586,7 @@ func TestParseExtensions_TruncatedHeader(t *testing.T) {
 	t.Parallel()
 
 	// 3 bytes — need 4 for the extension header (type=2 + len=2).
-	_, err := parseExtensions([]byte{0x00, 0x00, 0x00})
+	_, _, err := parseExtensions([]byte{0x00, 0x00, 0x00})
 	if err == nil {
 		t.Fatal("expected errExtHeaderTruncated, got nil")
 	}
@@ -600,7 +600,7 @@ func TestParseExtensions_BodyTruncated(t *testing.T) {
 	t.Parallel()
 
 	// Header: type=0x0000 (SNI), len=10 — but only 0 bytes of body follow.
-	_, err := parseExtensions([]byte{0x00, 0x00, 0x00, 0x0A})
+	_, _, err := parseExtensions([]byte{0x00, 0x00, 0x00, 0x0A})
 	if err == nil {
 		t.Fatal("expected errExtBodyTruncated, got nil")
 	}

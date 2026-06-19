@@ -68,6 +68,10 @@ var (
 		"handshake: CertificateRequest supported_signature_algorithms has odd byte count",
 	)
 	errFinishedVerifyLen = errors.New("handshake: Finished: verify_data length must be 12 or 32")
+
+	errCHTrailingData   = errors.New("handshake: ClientHello: trailing bytes after extensions")
+	errSHTrailingData   = errors.New("handshake: ServerHello: trailing bytes after extensions")
+	errCertTrailingData = errors.New("handshake: Certificate: trailing bytes after certificate_list")
 )
 
 // TLS client state machine errors.
@@ -82,6 +86,7 @@ var (
 	errUnknownSuite          = errors.New("tls: server chose unknown cipher suite")
 	errNonNullCompression    = errors.New("tls: server chose non-null compression method")
 	errUnexpectedEMS         = errors.New("tls: server sent extended_master_secret extension but we did not offer it")
+	errSHUnofferedExt        = errors.New("tls: server sent a ServerHello extension that was not offered")
 	errExpectedCertificate   = errors.New("tls: expected Certificate")
 	errEmptyCertList         = errors.New("tls: server sent empty certificate list")
 	errDuplicateSKE          = errors.New("tls: duplicate ServerKeyExchange in server flight")
@@ -97,6 +102,7 @@ var (
 	errECDHESigTruncated     = errors.New("tls: ECDHE ServerKeyExchange: signature truncated")
 	errDHESigSectionShort    = errors.New("tls: DHE ServerKeyExchange: signature section too short")
 	errDHESigTruncated       = errors.New("tls: DHE ServerKeyExchange: signature truncated")
+	errSKEUnadvertisedSigAlg = errors.New("tls: ServerKeyExchange signature algorithm not offered by client")
 	errU16PrefixTruncated    = errors.New("truncated: need 2 bytes for length prefix")
 	errU16BodyTruncated      = errors.New("truncated: body too short")
 	errCertNotRSA            = errors.New("cert public key is not RSA")
@@ -107,11 +113,11 @@ var (
 	errUnsupportedHashAlg    = errors.New("unsupported hash algorithm")
 	errUnsupportedKeyType    = errors.New("tls: CertificateVerify: unsupported key type")
 	errKeyExpansionZero      = errors.New("tls: key expansion total length is zero for suite")
-	errHSRecordTooShort      = errors.New("tls: handshake record too short")
 	errHSBodyTruncated       = errors.New("tls: handshake body truncated")
 	errAlertRecordTruncated  = errors.New("tls: alert record truncated")
 	errAlertReceived         = errors.New("tls: received alert")
 	errUnexpectedRecordType  = errors.New("tls: unexpected record type during handshake")
+	errInterleavedHandshake  = errors.New("tls: non-handshake record interleaved with a fragmented handshake message")
 	errKeyExpansionZeroLocal = errors.New("key expansion total length is zero")
 	errECDSATrailingBytes    = errors.New("ecdsa: trailing bytes in signature")
 	errECDSAVerifyFailed     = errors.New("ecdsa: signature verification failed")
