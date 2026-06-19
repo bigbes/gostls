@@ -30,6 +30,7 @@ func makePostHandshakeConn(t *testing.T) (*Conn, net.Conn) {
 	c := newConn(client, &Config{})
 	// Mark handshake succeeded.
 	c.handshakeOnce.Do(func() {})
+	c.handshakeOK.Store(true)
 
 	return c, server
 }
@@ -370,6 +371,7 @@ func TestConn_Close_DoubleClose(t *testing.T) {
 
 	// Mark handshake done successfully so Close sends close_notify.
 	c.handshakeOnce.Do(func() {})
+	c.handshakeOK.Store(true)
 
 	// First close: sends close_notify + closes conn.
 	if err := c.Close(); err != nil {
@@ -385,8 +387,8 @@ func TestConn_Close_DoubleClose(t *testing.T) {
 }
 
 // TestConn_Close_BeforeHandshake verifies that Close on a conn where no
-// handshake was ever started does NOT send close_notify (handshakeErr is set
-// to errConnClosed by the Once) and closes the underlying conn.
+// handshake ran does NOT send close_notify (handshakeOK is false) and closes
+// the underlying conn.
 func TestConn_Close_BeforeHandshake(t *testing.T) {
 	t.Parallel()
 
@@ -535,6 +537,7 @@ func TestConn_Handshake_Idempotent(t *testing.T) {
 
 	// Mark handshake as successfully done.
 	c.handshakeOnce.Do(func() {})
+	c.handshakeOK.Store(true)
 
 	for range 3 {
 		if err := c.Handshake(); err != nil {

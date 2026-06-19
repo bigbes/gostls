@@ -26,6 +26,9 @@ var (
 	errAlertReceived = errors.New("tls: received alert")
 	// errUnexpectedRecord is wrapped with the content type when an unexpected record type arrives.
 	errUnexpectedRecord = errors.New("tls: unexpected record type in application data phase")
+	// errNoServerName is returned when verification is enabled but no ServerName
+	// is set and none could be derived from the dial address.
+	errNoServerName = errors.New("tls: no ServerName and InsecureSkipVerify is false; cannot verify server identity")
 )
 
 // alertMinLen is the minimum length of a TLS alert record (level + description).
@@ -36,7 +39,7 @@ var _ net.Conn = (*Conn)(nil)
 
 // Conn is a TLS 1.2 client connection implementing net.Conn.
 //
-// The zero value is not usable; create with newConn.
+// The zero value is not usable; create one with NewConn or Dialer.DialContext.
 type Conn struct {
 	conn   net.Conn
 	config *Config
@@ -58,6 +61,21 @@ type Conn struct {
 
 	// readBuf holds decrypted application data not yet consumed by Read.
 	readBuf []byte
+
+	// readErr is the sticky error that terminated the read side. Once set (by a
+	// transport error, fatal alert, or unexpected record type) every Read
+	// returns it instead of parsing the desynchronized stream. Guarded by inMu.
+	readErr error
+
+	// handshakeOK is set true once the handshake completes successfully. Close
+	// consults it to decide whether to send close_notify without blocking on
+	// handshakeOnce (a still-running handshake is interrupted by closing conn).
+	handshakeOK atomic.Bool
+
+	// serverNameFromDial is the host the Dialer parsed from the dial address,
+	// used as the effective ServerName when Config.ServerName is empty (matching
+	// crypto/tls.Dialer). Empty for connections created via NewConn.
+	serverNameFromDial string
 }
 
 // NewConn creates a Conn wrapping the given net.Conn with the provided Config.
@@ -84,7 +102,16 @@ func newConn(c net.Conn, config *Config) *Conn {
 // It is called automatically by Read and Write if needed.
 func (c *Conn) Handshake() error {
 	c.handshakeOnce.Do(func() {
+		if c.closed.Load() {
+			c.handshakeErr = errConnClosed
+
+			return
+		}
+
 		c.handshakeErr = c.doHandshake()
+		if c.handshakeErr == nil {
+			c.handshakeOK.Store(true)
+		}
 	})
 
 	return c.handshakeErr
@@ -113,10 +140,19 @@ func (c *Conn) Read(b []byte) (int, error) {
 		return n, nil
 	}
 
+	// Once the record stream is desynchronized (a transport error, a fatal alert,
+	// or an unexpected record type), every subsequent Read must fail with the
+	// same error instead of attempting to parse the corrupted stream.
+	if c.readErr != nil {
+		return 0, c.readErr
+	}
+
 	// Read records until we get application data.
 	for {
 		ct, payload, err := c.layer.ReadRecord()
 		if err != nil {
+			c.readErr = err
+
 			return 0, err
 		}
 
@@ -136,20 +172,28 @@ func (c *Conn) Read(b []byte) (int, error) {
 
 		case record.ContentTypeAlert:
 			if len(payload) < alertMinLen {
+				c.readErr = errAlertTruncated
+
 				return 0, errAlertTruncated
 			}
 
 			level, desc := record.DecodeAlert(payload)
 			if desc == record.AlertCloseNotify {
+				c.readErr = io.EOF
+
 				return 0, io.EOF
 			}
 
-			return 0, fmt.Errorf("tls: received alert level=%d desc=%d: %w", level, desc, errAlertReceived)
+			c.readErr = fmt.Errorf("tls: received alert level=%d desc=%d: %w", level, desc, errAlertReceived)
+
+			return 0, c.readErr
 
 		default:
-			return 0, fmt.Errorf(
+			c.readErr = fmt.Errorf(
 				"tls: unexpected record type %d in application data phase: %w", ct, errUnexpectedRecord,
 			)
+
+			return 0, c.readErr
 		}
 	}
 }
@@ -191,19 +235,21 @@ func (c *Conn) Write(b []byte) (int, error) {
 	return written, nil
 }
 
-// Close sends a close_notify alert and closes the underlying connection.
+// Close sends a close_notify alert (when the handshake completed) and closes the
+// underlying connection. It never waits on an in-flight handshake: closing the
+// transport unblocks a handshake currently blocked on I/O, which then returns an
+// error. This is why the decision below uses the handshakeOK flag rather than
+// driving handshakeOnce (which would block).
 func (c *Conn) Close() error {
 	if !c.closed.CompareAndSwap(false, true) {
 		return nil
 	}
 
-	// Consume the Once: either (a) no-op if handshake already ran and result is
-	// preserved, (b) blocks waiting if a handshake is in flight, or (c) records
-	// errConnClosed if no handshake ever started.
-	c.handshakeOnce.Do(func() { c.handshakeErr = errConnClosed })
-
-	// Send close_notify if handshake succeeded.
-	if c.handshakeErr == nil {
+	// Send close_notify only when the handshake already completed successfully:
+	// the transport is then still open and a send protector is installed.
+	// handshakeOK is false while a handshake is in flight — exactly when we must
+	// not block trying to write an alert.
+	if c.handshakeOK.Load() {
 		c.outMu.Lock()
 
 		alertBody := record.EncodeAlert(record.AlertLevelWarning, record.AlertCloseNotify)
@@ -262,9 +308,22 @@ func (c *Conn) doHandshake() error {
 		return err
 	}
 
+	// Resolve the effective server name: Config.ServerName, else the host the
+	// Dialer parsed from the dial address (crypto/tls.Dialer does the same).
+	// With verification enabled an empty name would silently skip hostname
+	// checking (fail open), so fail closed instead.
+	serverName := c.config.ServerName
+	if serverName == "" {
+		serverName = c.serverNameFromDial
+	}
+
+	if serverName == "" && !c.config.InsecureSkipVerify {
+		return errNoServerName
+	}
+
 	params := handshake.ClientParams{
 		Rand:                  c.config.rand(),
-		ServerName:            c.config.ServerName,
+		ServerName:            serverName,
 		OfferedSuites:         offeredSuites,
 		RootCAs:               rootCAs,
 		GOSTRoots:             gostCertsParam(c.config.GOSTRoots),
