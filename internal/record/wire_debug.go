@@ -6,8 +6,10 @@ import (
 	"sync"
 )
 
-// wireDebugFilePerm is the permission mode for the debug log file.
-const wireDebugFilePerm = 0o644
+// wireDebugFilePerm is the permission mode for the debug log file. The log
+// contains decrypted TLS plaintext, so it is created owner-only (0600) rather
+// than world-readable.
+const wireDebugFilePerm = 0o600
 
 var (
 	wireDebugMu       sync.Mutex
