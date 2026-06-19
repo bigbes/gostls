@@ -1,4 +1,4 @@
-// Package tls implements a TLS 1.2 client with a crypto/tls-shaped API.
+// Package gostls implements a TLS 1.2 client with a crypto/tls-shaped API.
 //
 // This implementation is TLS 1.2 only. TLS 1.3, session resumption,
 // renegotiation, ALPN extensibility, and 0-RTT are not supported.
