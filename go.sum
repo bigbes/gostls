@@ -1,7 +1,7 @@
 filippo.io/bigmod v0.1.0 h1:UNzDk7y9ADKST+axd9skUpBQeW7fG2KrTZyOE4uGQy8=
 filippo.io/bigmod v0.1.0/go.mod h1:OjOXDNlClLblvXdwgFFOQFJEocLhhtai8vGLy0JCZlI=
-github.com/bigbes/gostcrypto v0.0.0-20260611130353-31cc66c00c26 h1:cP5DegFM6S8rb7Jf9JUH7vAFjRXk3O7JhjDOGJttXDw=
-github.com/bigbes/gostcrypto v0.0.0-20260611130353-31cc66c00c26/go.mod h1:dKoSVojgEkPFP8OMNDhkXqafKvlI+8wWr9R0cQX3xy8=
+github.com/bigbes/gostcrypto v0.1.0 h1:eJOdsSokpXv0/eB0XfaKcKkk2fg9ydB41kgPod03bkw=
+github.com/bigbes/gostcrypto v0.1.0/go.mod h1:dKoSVojgEkPFP8OMNDhkXqafKvlI+8wWr9R0cQX3xy8=
 golang.org/x/crypto v0.53.0 h1:QZ4Muo8THX6CizN2vPPd5fBGHyogrdK9fG4wLPFUsto=
 golang.org/x/crypto v0.53.0/go.mod h1:DNLU434OwVakk9PzuwV8w62mAJpRJL3vsgcfp4Qnsio=
 golang.org/x/sys v0.46.0 h1:noSf2Fq6F8DBgS+LysIkx7rIExoNHJsxOAtPp4rthXw=
