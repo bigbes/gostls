@@ -3,6 +3,7 @@ package handshake
 import (
 	"encoding/binary"
 	"fmt"
+	"slices"
 )
 
 // Extension type codes (RFC registry).
@@ -75,6 +76,11 @@ func parseExtensions(extData []byte) (parsedExtensions, []uint16, error) {
 
 		extType := binary.BigEndian.Uint16(extData[:sizeUint16])
 		extLen := int(binary.BigEndian.Uint16(extData[sizeUint16:extHeaderSize]))
+
+		// No extension type may appear more than once (RFC 5246 §7.4.1.4).
+		if slices.Contains(seen, extType) {
+			return parsedExtensions{}, nil, fmt.Errorf("%w 0x%04x", errDuplicateExtension, extType)
+		}
 
 		extData = extData[extHeaderSize:]
 

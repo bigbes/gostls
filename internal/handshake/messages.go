@@ -290,6 +290,12 @@ func parseServerHello(b []byte) (*ServerHello, error) {
 			return nil, err
 		}
 
+		// The ServerHello server_name extension_data MUST be empty (RFC 6066 §3):
+		// a non-empty host_name echo is a protocol violation.
+		if ext.ServerName != "" {
+			return nil, errServerHelloNonEmptySNI
+		}
+
 		m.ExtendedMasterSecret = ext.ExtendedMasterSecret
 		m.RenegotiationInfo = ext.RenegotiationInfo
 		m.ExtensionTypes = seen

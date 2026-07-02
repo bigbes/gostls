@@ -130,3 +130,31 @@ Ordered by value. None is a live security break for the client.
 ### Not defects (by design, noted so they are not re-chased)
 TLS 1.3, session resumption/tickets, renegotiation, ALPN, OCSP/SCT, client cert
 chains, and a server role are all intentionally out of scope and fail closed.
+
+---
+
+## Second pass — coverage-gap tests + two more fixes
+
+A follow-up multi-agent run wrote tests for the coverage gaps catalogued above
+(write → adversarial mutation-verify → completeness ledger), added as
+`covgap_review_test.go` in each package. Highlights: the `computeKeyExchange`
+dispatch table, `Transcript.Sum` edge cases, unsolicited/duplicate ServerHello
+extension rejection, per-protector `Open(Seal(x))==x` fuzz for all six record
+protectors, a concurrent Read+Write `-race` test, AEAD sequence-number binding,
+a differential TLS 1.2 PRF oracle (independent P_hash reimplementation), and
+DHE/GOST-2018 property tests against independent primitives (`math/big`, raw
+Streebog) — **no self-referential KATs**. KATs with no reachable independent
+oracle (GOST-2018 composite, GOST PRF chained P_hash) were honestly deferred
+rather than faked, because the only oracle is GPL gogost across the license
+boundary.
+
+That run surfaced two real RFC-hygiene bugs, now **fixed** (tests assert
+rejection):
+- ServerHello accepting a **duplicate extension type** (RFC 5246 §7.4.1.4) —
+  `parseExtensions` now rejects repeats (`errDuplicateExtension`).
+- ServerHello accepting a **non-empty `server_name` echo** (RFC 6066 §3) —
+  `parseServerHello` now rejects it (`errServerHelloNonEmptySNI`).
+
+Still deferred: the ServerHello allow-set is not narrowed to reject *offered but
+ServerHello-invalid* extension types (`supported_groups` etc.), and the DHE
+FFDHE exact allowlist, EMS, fatal-alert-to-peer, and the KAT oracles above.

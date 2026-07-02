@@ -25,6 +25,10 @@ var (
 	errExtHeaderTruncated = errors.New("handshake: truncated extension header (need 4 bytes)")
 	errExtBodyTruncated   = errors.New("handshake: extension body truncated")
 	errExtUnknown         = errors.New("handshake: unknown extension")
+	errDuplicateExtension = errors.New("handshake: duplicate extension type")
+	// errServerHelloNonEmptySNI reports a ServerHello whose server_name echo is
+	// non-empty (RFC 6066 §3 requires it to be empty).
+	errServerHelloNonEmptySNI = errors.New("handshake: ServerHello server_name extension must be empty")
 
 	errSNITruncatedListLen    = errors.New("handshake: server_name: truncated list length")
 	errSNIListLenExceeds      = errors.New("handshake: server_name: list length exceeds available bytes")
