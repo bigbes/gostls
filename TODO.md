@@ -1,37 +1,52 @@
 # TODO — gostls
 
-Carried over from `gostcrypto/TODO.md` (pre-split monorepo notes),
-re-verified against this module 2026-06-10.
+See **`REVIEW.md`** for the full 2026-07-02 deep-review findings (what was fixed
+and what remains). This file tracks the still-open items only.
 
-## Under-tested
+## Corrected since the last revision (no longer open)
 
-- **`internal/handshake/transcript_test.go`** covers happy path, nil factory,
-  and shape-collision regression. Missing: `Sum` on an empty transcript
-  (before any `Write`), `Sum` idempotence (two back-to-back calls return
-  identical bytes), `Write` interleaved with `Sum` calls.
-- **`computeKeyExchange` KX dispatch** (`internal/handshake/client.go`
-  ~722-753) has no unit test — covered only transitively by live-EE
-  integration runs. A table-driven test over every `(suite.KX, server message
-  type)` combination would prevent the latent `unknown KX kind` class of bug
-  that previously survived from Phase 6 to Phase 10.
-- **`Transcript.buf` is unbounded** (`internal/handshake/transcript.go`).
-  A pathological handshake that Writes without bound would OOM. Real max is a
-  few KB; no cap, no cap test. Acceptable today, but worth a cap before ever
-  accepting untrusted server input on a long-lived handshake.
-- **`record.Layer` disjoint-halves claim** (`internal/record/record.go:50-57`):
-  "concurrent WriteRecord + ReadRecord safe; same-side not safe" is a
-  contract-by-doc — no race test exercises either half.
-- **Fuzz/bench gaps**: `FuzzParseMessage` and `FuzzParseExtensions` exist; the
-  record-layer parser has no fuzz target, and there are no benchmarks anywhere
-  in the module (transcript buffer-and-replay cost confirmed theoretically,
-  never measured).
+- `Transcript.buf` **is** now capped (`maxTranscriptBytes = 256 KiB`,
+  `internal/handshake/transcript.go`) — the old "unbounded" note is stale.
+- The record-layer parser **has** a fuzz target (`FuzzReadRecord`,
+  `internal/record/fuzz_test.go`); the DHE/GOST-DER parsers have fuzz targets in
+  `internal/ke/fuzz_test.go`. The old "no record fuzz" note is stale.
+- The `openssl_gost_engine` double-registration hazard is now guarded by
+  `//go:build !openssl_gost_engine` on the default-backend files (still needs the
+  cross-tag invariant test when the counterpart lands — see below).
+- Post-decrypt plaintext is now bounded to 2¹⁴; the record version is now lenient
+  (0x0301–0x0303) for interop.
 
-## Structural
+## Under-tested (still open)
 
-- **`internal/suites/gost_suites.go` references a future
-  `gost_suites_openssl_engine.go`** that does not exist yet. When it lands, no
-  process or test enforces that both register the same ID/Name sets — add a
-  cross-tag invariant test (same IDs modulo intentional exceptions) to catch
-  silent backend divergence.
+- **`internal/handshake/transcript_test.go`**: `Sum` on an empty transcript,
+  `Sum` idempotence, and `Write` interleaved with `Sum`.
+- **`computeKeyExchange` KX dispatch** (`internal/handshake/client.go`): no unit
+  test over every `(suite.KX, server message type)` combination; covered only by
+  live-EE runs.
+- **`record.Layer` disjoint-halves**: concurrent `WriteRecord`+`ReadRecord`
+  safety is a contract-by-doc; add a `-race` loopback test.
+- **KAT gaps** (self-derived, not conformance): published IETF TLS 1.2 PRF
+  vectors; offline HMAC-Streebog-256 / HMAC-GOSTR341194 P_hash KATs; a
+  gost-engine oracle vector for GOST-2018 (`gost2018_test.go` `TODO(phase5)`); an
+  external VKO2012_256 vector.
+- **Fuzz gaps**: `verifyECDHEServerKeyExchange` / `verifyDHEServerKeyExchange`
+  (attacker-driven length arithmetic, not reached by `ParseMessage`);
+  `readHandshakeRecord` reassembly; per-protector `Open(Seal(x))==x` round-trip.
+- **Driven tests**: coalesced trailing HelloRequest after the server Finished
+  (exercises the new `hsBuf` guard end-to-end); wrong-length Finished under a
+  mismatched suite.
+- **No benchmarks** anywhere in the module.
+
+## Structural / features (see REVIEW.md “Deferred”)
+
+- Cross-tag invariant test for the future `gost_suites_openssl_engine.go`
+  (same ID/Name sets modulo intentional exceptions).
+- Fatal alert to the peer on record-layer errors (RFC 5246 §7.2.2).
+- Extended Master Secret (RFC 7627).
+- DHE FFDHE exact-allowlist (stronger than the current 2048-bit floor).
+- `ConnectionState` accessor (currently a dead struct).
+- Thread `Config.Rand` into DHE for consistency.
+- `VKO2012_512` (512-bit GOST-2012 param set) — confirm whether any target
+  server needs it.
 - **TLS 1.3** — out of scope; the module is TLS 1.2 only (documented in
   `config.go`).

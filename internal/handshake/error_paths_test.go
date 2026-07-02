@@ -568,6 +568,17 @@ func TestParseRenegotiationInfo_NonEmpty(t *testing.T) {
 	}
 }
 
+func TestParseRenegotiationInfo_TrailingBytes(t *testing.T) {
+	t.Parallel()
+
+	// ri_len=0 (valid marker) but a trailing byte follows — must be rejected
+	// rather than silently ignored (RFC 5746 §3.2).
+	err := parseRenegotiationInfo([]byte{0x00, 0xAA})
+	if !errors.Is(err, errRITrailingBytes) {
+		t.Fatalf("got %v, want errRITrailingBytes", err)
+	}
+}
+
 func TestParseRenegotiationInfo_EmptyRIBody(t *testing.T) {
 	t.Parallel()
 

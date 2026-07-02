@@ -5,6 +5,7 @@ import (
 	"crypto/aes"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"testing"
@@ -324,19 +325,60 @@ func TestRecord_Rejects_UnknownContentType(t *testing.T) {
 	}
 }
 
-// TestRecord_Rejects_VersionMismatch verifies that a record with a wrong
-// version is rejected.
+// TestRecord_Rejects_VersionMismatch verifies that a record whose version is
+// outside the accepted TLS 1.x major-3 range (0x0301..0x0303) is rejected.
 func TestRecord_Rejects_VersionMismatch(t *testing.T) {
 	t.Parallel()
 
-	// Build a syntactically valid record but with version 0x03 0x01 (TLS 1.0).
-	hdr := append(make([]byte, 0, 9), byte(0x17), 0x03, 0x01, 0x00, 0x04)
-	data := append(hdr, []byte("xxxx")...)
-	l := makeLayer(readOnlyRW{bytes.NewReader(data)})
+	// versions below TLS 1.0 (SSL 3.0), above TLS 1.2 (TLS 1.3), and with a
+	// non-3 major must all be rejected.
+	for _, ver := range []struct {
+		name   string
+		hi, lo byte
+	}{
+		{"ssl3.0", 0x03, 0x00},
+		{"tls1.3", 0x03, 0x04},
+		{"major2", 0x02, 0x03},
+		{"major0", 0x00, 0x00},
+	} {
+		t.Run(ver.name, func(t *testing.T) {
+			t.Parallel()
 
-	_, _, err := l.ReadRecord()
-	if err == nil {
-		t.Fatal("expected error for version mismatch, got nil")
+			hdr := append(make([]byte, 0, 9), byte(0x17), ver.hi, ver.lo, 0x00, 0x04)
+			data := append(hdr, []byte("xxxx")...)
+			l := makeLayer(readOnlyRW{bytes.NewReader(data)})
+
+			if _, _, err := l.ReadRecord(); err == nil {
+				t.Fatalf("version %02x%02x: expected rejection, got nil", ver.hi, ver.lo)
+			}
+		})
+	}
+}
+
+// TestRecord_Accepts_LegacyRecordVersion verifies that TLS 1.0/1.1 record-layer
+// versions on incoming records are accepted for interop (RFC 5246 App. E): a
+// TLS 1.2 peer may stamp early records with {3,1}. The nullProtector passes the
+// payload through, so a well-formed record round-trips.
+func TestRecord_Accepts_LegacyRecordVersion(t *testing.T) {
+	t.Parallel()
+
+	for _, lo := range []byte{0x01, 0x02, 0x03} {
+		t.Run(fmt.Sprintf("minor%02x", lo), func(t *testing.T) {
+			t.Parallel()
+
+			hdr := append(make([]byte, 0, 9), record.ContentTypeHandshake, 0x03, lo, 0x00, 0x04)
+			data := append(hdr, []byte("abcd")...)
+			l := makeLayer(readOnlyRW{bytes.NewReader(data)})
+
+			ct, payload, err := l.ReadRecord()
+			if err != nil {
+				t.Fatalf("minor %02x: unexpected error: %v", lo, err)
+			}
+
+			if ct != record.ContentTypeHandshake || string(payload) != "abcd" {
+				t.Fatalf("minor %02x: got ct=%d payload=%q", lo, ct, payload)
+			}
+		})
 	}
 }
 
@@ -353,6 +395,33 @@ func TestRecord_Rejects_OversizedFragment(t *testing.T) {
 	_, _, err := l.ReadRecord()
 	if err == nil {
 		t.Fatal("expected error for oversized fragment, got nil")
+	}
+}
+
+// TestRecord_Rejects_OversizedPlaintext verifies that a decrypted plaintext
+// fragment larger than 2^14 bytes is rejected, even though its ciphertext fits
+// within the 2^14+2048 wire bound. Under nullProtector the plaintext equals the
+// fragment, so a 16385-byte fragment exercises the post-decrypt ceiling.
+func TestRecord_Rejects_OversizedPlaintext(t *testing.T) {
+	t.Parallel()
+
+	plaintextLen := uint16(1<<14 + 1) // 16385, within maxFragmentLen but over 2^14.
+
+	const recordHeaderLen = 5
+
+	data := make([]byte, 0, recordHeaderLen+int(plaintextLen))
+
+	data = append(data,
+		record.ContentTypeApplicationData, 0x03, 0x03,
+		byte(plaintextLen>>8), byte(plaintextLen),
+	)
+	data = append(data, bytes.Repeat([]byte{0x41}, int(plaintextLen))...)
+
+	l := makeLayer(readOnlyRW{bytes.NewReader(data)})
+
+	_, _, err := l.ReadRecord()
+	if err == nil {
+		t.Fatal("expected AlertRecordOverflow for over-2^14 plaintext, got nil")
 	}
 }
 

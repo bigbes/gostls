@@ -211,6 +211,11 @@ func (e *VKOGost2001Exchange) ClientKeyExchange(_ []byte) (cke []byte, preMaster
 		return nil, nil, fmt.Errorf("ke/vkogost: VKO2001 key wrap: %w", err)
 	}
 
+	if len(wrapped) < cryptoProWrapIMITEnd {
+		return nil, nil, fmt.Errorf("ke/vkogost: VKO2001 key wrap output %d bytes, want %d: %w",
+			len(wrapped), cryptoProWrapIMITEnd, errVKO2001BadKEKLen)
+	}
+
 	cke, err = marshalGOSTKeyTransport(
 		e.spkiAlgo,
 		e.ephemPubRaw,
@@ -296,9 +301,19 @@ func (e *VKOGost2012_256Exchange) ClientKeyExchange(_ []byte) (cke []byte, preMa
 		return nil, nil, fmt.Errorf("ke/vkogost: VKO2012_256 shared key: %w", err)
 	}
 
+	if len(kek) != vkoKEKLen {
+		return nil, nil, fmt.Errorf("ke/vkogost: VKO2012_256 returned %d bytes, want 32: %w",
+			len(kek), errVKO2001BadKEKLen)
+	}
+
 	wrapped, err := gost.KeyWrapCryptoPro(gost.SboxTC26Z, kek, e.ukm, preMaster)
 	if err != nil {
 		return nil, nil, fmt.Errorf("ke/vkogost: VKO2012_256 key wrap: %w", err)
+	}
+
+	if len(wrapped) < cryptoProWrapIMITEnd {
+		return nil, nil, fmt.Errorf("ke/vkogost: VKO2012_256 key wrap output %d bytes, want %d: %w",
+			len(wrapped), cryptoProWrapIMITEnd, errVKO2001BadKEKLen)
 	}
 
 	cke, err = marshalGOSTKeyTransport(

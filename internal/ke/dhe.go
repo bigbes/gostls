@@ -11,8 +11,12 @@ import (
 
 // DHE wire format constants.
 const (
-	// dheMinPBits is the minimum allowed bit length for the DHE prime p (1024).
-	dheMinPBits = 1024
+	// dheMinPBits is the minimum allowed bit length for the DHE prime p. A
+	// 2048-bit floor rejects the standardized 1024-bit groups broken by
+	// precomputation (Logjam, CVE-2015-4000). The client advertises only the
+	// RFC 7919 ffdhe2048/ffdhe3072 groups, so a compliant server never sends a
+	// smaller prime.
+	dheMinPBits = 2048
 
 	// dheU16PrefixLen is the size of the 2-byte big-endian length prefix used
 	// in both the ServerKeyExchange and ClientKeyExchange DHE wire formats.
@@ -34,7 +38,7 @@ var (
 	errDHETrailingBytes = errors.New("ke: DHE: trailing bytes in serverParams")
 	errDHETooShort      = errors.New("too short for length prefix: need 2")
 	errDHETruncated     = errors.New("truncated")
-	errDHEPTooShort     = errors.New("ke: DHE: p is too short: minimum is 1024 bits")
+	errDHEPTooShort     = errors.New("ke: DHE: p is too short: minimum is 2048 bits")
 	errDHEPEven         = errors.New("ke: DHE: p is even — not a valid DH prime")
 	errDHEGTooSmall     = errors.New("ke: DHE: g must be ≥ 2")
 	errDHEYsLow         = errors.New("ke: DHE: Ys out of range: must be > 1")
@@ -56,7 +60,7 @@ var (
 //
 // # Parameter validation (fail-fast)
 //
-//   - p must be at least 1024 bits (128 bytes).
+//   - p must be at least 2048 bits (256 bytes).
 //   - p must be odd (even p is not prime, hence invalid).
 //   - g must be ≥ 2.
 //   - 1 < Ys < p-1 (strict bounds; identity element and p-1 are both rejected).
@@ -209,11 +213,11 @@ func readU16LenPrefixed(b []byte) (data, rest []byte, err error) {
 // the server's ServerKeyExchange message — public data). No secret material
 // is touched in this function.
 func validateDHEParams(pBytes, gBytes, YsBytes []byte) error {
-	// p must be at least 1024 bits.
+	// p must be at least dheMinPBits (2048) bits.
 	pBits := len(pBytes) * bitsPerByte
 
 	if pBits < dheMinPBits {
-		return fmt.Errorf("ke: DHE: p is too short: %d bits, minimum is 1024: %w", pBits, errDHEPTooShort)
+		return fmt.Errorf("ke: DHE: p is too short: %d bits, minimum is %d: %w", pBits, dheMinPBits, errDHEPTooShort)
 	}
 
 	// p must be odd (necessary condition for primality; primes > 2 are odd).

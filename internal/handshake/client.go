@@ -72,6 +72,28 @@ func sigAlgAdvertised(hashAlg, sigAlg uint8) bool {
 	return false
 }
 
+// skeSigAlgMatchesAuth reports whether a ServerKeyExchange signature algorithm
+// byte is consistent with the negotiated suite's authentication kind. RFC 5246
+// §7.4.3 / RFC 4492 §5.4 require the SKE signature to use the suite's auth
+// algorithm — an ECDHE_RSA suite must be RSA-signed, ECDHE_ECDSA must be
+// ECDSA-signed. Without this, a server holding a chain-valid RSA certificate
+// could authenticate an ECDHE_ECDSA suite with an RSA signature (algorithm
+// confusion), which crypto/tls explicitly forbids.
+func skeSigAlgMatchesAuth(sigAlg uint8, auth suites.AuthKind) bool {
+	switch auth {
+	case suites.AuthRSA:
+		return sigAlg == sigAlgRSA
+	case suites.AuthECDSA:
+		return sigAlg == sigAlgECDSA
+	case suites.AuthAnonymous, suites.AuthGOST2001, suites.AuthGOST2012_256:
+		// These suites do not send a signed ServerKeyExchange; reaching here with
+		// such a suite is itself a protocol violation.
+		return false
+	default:
+		return false
+	}
+}
+
 // availableCipherNames is the set of cipher names negotiable by the default
 // client configuration. GOST suites are registered in every build (clean-room
 // backend) but are not included in this default set; applications requesting
@@ -313,6 +335,21 @@ func (c *ClientState) Handshake() error {
 		return c.fatal(record.AlertUnexpectedMessage, errInterleavedHandshake)
 	}
 
+	// Steps 11-12: receive the server ChangeCipherSpec and Finished.
+	if err := c.receiveServerFinished(masterSecret, recvProt); err != nil {
+		return err
+	}
+
+	c.done = true
+
+	return nil
+}
+
+// receiveServerFinished performs the final leg of the handshake (RFC 5246
+// §7.4.9): read the server ChangeCipherSpec, install the receive protector, then
+// read and verify the server Finished against the transcript that includes the
+// client Finished. It appends the verified server Finished to the transcript.
+func (c *ClientState) receiveServerFinished(masterSecret []byte, recvProt record.Protector) error {
 	// Step 11: receive server ChangeCipherSpec (straight-line: read one record).
 	recvCT, recvPayload, err := c.layer.ReadRecord()
 	if err != nil {
@@ -369,9 +406,14 @@ func (c *ClientState) Handshake() error {
 		return c.fatal(record.AlertDecryptError, errFinishedMismatch)
 	}
 
-	c.transcript.Write(buildEnvelope(TypeFinished, serverFinishedPayload))
+	// The server Finished must be the last handshake message. Any handshake
+	// bytes coalesced into the same record after it (e.g. a HelloRequest) are a
+	// protocol violation and must not be silently discarded.
+	if len(c.hsBuf) != 0 {
+		return c.fatal(record.AlertUnexpectedMessage, errInterleavedHandshake)
+	}
 
-	c.done = true
+	c.transcript.Write(buildEnvelope(TypeFinished, serverFinishedPayload))
 
 	return nil
 }
@@ -738,6 +780,13 @@ func (c *ClientState) verifyECDHEServerKeyExchange(body []byte, cert *x509.Certi
 			fmt.Errorf("%w: hash=0x%02x sig=0x%02x", errSKEUnadvertisedSigAlg, hashAlg, sigAlg))
 	}
 
+	// The signature algorithm must match the negotiated suite's auth kind
+	// (no RSA/ECDSA cross-suite confusion).
+	if !skeSigAlgMatchesAuth(sigAlg, c.suite.Auth) {
+		return nil, c.fatal(record.AlertIllegalParameter,
+			fmt.Errorf("%w: sig=0x%02x suite=%s", errSKESigAuthMismatch, sigAlg, c.suite.Name))
+	}
+
 	// Build signed data: clientRandom || serverRandom || curve_type || named_curve || point_len || point
 	// (RFC 4492 §5.4: the signature covers client_random + server_random + ServerECDHParams)
 	// ServerECDHParams is the entire params section: curve_type || named_curve || public.
@@ -815,6 +864,13 @@ func (c *ClientState) verifyDHEServerKeyExchange(body []byte, cert *x509.Certifi
 	if !sigAlgAdvertised(hashAlg, sigAlg) {
 		return nil, c.fatal(record.AlertIllegalParameter,
 			fmt.Errorf("%w: hash=0x%02x sig=0x%02x", errSKEUnadvertisedSigAlg, hashAlg, sigAlg))
+	}
+
+	// The signature algorithm must match the negotiated suite's auth kind
+	// (no RSA/ECDSA cross-suite confusion).
+	if !skeSigAlgMatchesAuth(sigAlg, c.suite.Auth) {
+		return nil, c.fatal(record.AlertIllegalParameter,
+			fmt.Errorf("%w: sig=0x%02x suite=%s", errSKESigAuthMismatch, sigAlg, c.suite.Name))
 	}
 
 	// Signed data: clientRandom || serverRandom || ServerDHParams.

@@ -41,6 +41,26 @@ const maxFragmentLen = tlsMaxPlaintextLen + tlsMaxCiphertextOverhead
 // recordHeaderLen is the fixed size of a TLS record header.
 const recordHeaderLen = 5
 
+// recordVersionMajor is the major byte (3) shared by all TLS/SSL3 versions.
+const recordVersionMajor = byte(0x03)
+
+// recordVersionMinTLS10 is the minor byte of TLS 1.0 (0x0301), the lowest
+// record-layer version accepted on incoming records.
+const recordVersionMinTLS10 = byte(0x01)
+
+// recordVersionByteShift is the bit shift to extract the high byte of a 16-bit
+// record-header version.
+const recordVersionByteShift = 8
+
+// isAcceptedRecordVersion reports whether a record-header version is an accepted
+// TLS 1.x version (0x0301 TLS 1.0 .. 0x0303 TLS 1.2). See ReadRecord for why the
+// record-layer version is not pinned to 0x0303.
+func isAcceptedRecordVersion(ver uint16) bool {
+	return byte(ver>>recordVersionByteShift) == recordVersionMajor &&
+		byte(ver) >= recordVersionMinTLS10 &&
+		byte(ver) <= tlsVersionLo
+}
+
 // isKnownContentType returns true for the four valid TLS 1.2 content types.
 func isKnownContentType(ct uint8) bool {
 	switch ct {
@@ -180,7 +200,12 @@ func (l *Layer) ReadRecord() (contentType uint8, payload []byte, err error) {
 		return 0, nil, NewFatalAlertError(AlertIllegalParameter)
 	}
 
-	if ver != tlsVersion {
+	// Accept any TLS 1.x major-3 record version (0x0301..0x0303) on the wire.
+	// RFC 5246 App. E permits a TLS 1.2 peer to stamp early records (notably the
+	// first ServerHello flight) with {3,1}; crypto/tls likewise does not pin the
+	// record-layer version. The negotiated protocol version is enforced
+	// separately in the handshake layer via ServerHello.version.
+	if !isAcceptedRecordVersion(ver) {
 		return 0, nil, NewFatalAlertError(AlertProtocolVersion)
 	}
 
@@ -196,6 +221,14 @@ func (l *Layer) ReadRecord() (contentType uint8, payload []byte, err error) {
 	plain, err := l.recvProt.Open(l.recvSeq, hdr[:], fragment)
 	if err != nil {
 		return 0, nil, err
+	}
+
+	// A decrypted TLSPlaintext fragment must not exceed 2^14 bytes (RFC 5246
+	// §6.2.1). The pre-decrypt check above bounds only the ciphertext
+	// (2^14 + 2048); enforce the plaintext ceiling here so an upper layer never
+	// receives an over-long fragment.
+	if len(plain) > tlsMaxPlaintextLen {
+		return 0, nil, NewFatalAlertError(AlertRecordOverflow)
 	}
 
 	dumpPlaintext("recv", l.recvSeq, ct, ver, plain)

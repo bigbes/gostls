@@ -343,6 +343,12 @@ func parseRenegotiationInfo(b []byte) error {
 		return fmt.Errorf("%w (%d bytes)", errRINonEmpty, riLen)
 	}
 
+	// The extension_data must be exactly the 1-byte length + renegotiated_connection
+	// (RFC 5746 §3.2); reject trailing bytes rather than ignoring them.
+	if len(b) != riLen {
+		return fmt.Errorf("%w: %d trailing bytes", errRITrailingBytes, len(b)-riLen)
+	}
+
 	return nil
 }
 

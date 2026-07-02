@@ -1,3 +1,5 @@
+//go:build !openssl_gost_engine
+
 package suites
 
 // IsOpenSSLGostEngineBuild returns false when the openssl gost-engine
