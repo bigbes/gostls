@@ -939,6 +939,7 @@ func TestClient_RejectsUnknownCipher(t *testing.T) {
 	initTestFixtures(t)
 
 	clientConn, serverConn := net.Pipe()
+
 	defer func() { _ = clientConn.Close() }()
 	defer func() { _ = serverConn.Close() }()
 
@@ -988,6 +989,7 @@ func TestClient_RejectsBadFinished(t *testing.T) {
 	}
 
 	clientConn, serverConn := net.Pipe()
+
 	defer func() { _ = clientConn.Close() }()
 	defer func() { _ = serverConn.Close() }()
 
@@ -1094,6 +1096,7 @@ func TestClient_RejectsBadCert(t *testing.T) {
 	initTestFixtures(t)
 
 	clientConn, serverConn := net.Pipe()
+
 	defer func() { _ = clientConn.Close() }()
 	defer func() { _ = serverConn.Close() }()
 
@@ -1162,6 +1165,7 @@ func TestClient_Handshake_ApplicationData_RoundTrip(t *testing.T) {
 	}
 
 	clientConn, serverConn := net.Pipe()
+
 	defer func() { _ = clientConn.Close() }()
 
 	var serverRandom [32]byte
@@ -1236,6 +1240,7 @@ func TestClient_Close_SendsCloseNotify(t *testing.T) {
 	}
 
 	clientConn, serverConn := net.Pipe()
+
 	defer func() { _ = clientConn.Close() }()
 
 	var serverRandom [32]byte

@@ -105,12 +105,14 @@ func TestConn_Close_InterruptsInFlightHandshake(t *testing.T) {
 	c := newConn(raw, &Config{InsecureSkipVerify: true}) //nolint:gosec // stalling-peer test.
 
 	hsDone := make(chan error, 1)
+
 	go func() { hsDone <- c.Handshake() }()
 
 	// Give the handshake time to send ClientHello and block reading ServerHello.
 	time.Sleep(50 * time.Millisecond)
 
 	closeDone := make(chan error, 1)
+
 	go func() { closeDone <- c.Close() }()
 
 	select {

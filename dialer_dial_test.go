@@ -162,6 +162,7 @@ func TestDialer_DialContext_Success(t *testing.T) {
 	initTestFixtures(t)
 
 	ln := startStdlibTLSServer(t)
+
 	defer func() { _ = ln.Close() }()
 
 	pool := rootCAsForTest(t)
@@ -206,6 +207,7 @@ func TestDialer_DialContext_InsecureSkipVerify(t *testing.T) {
 	initTestFixtures(t)
 
 	ln := startStdlibTLSServer(t)
+
 	defer func() { _ = ln.Close() }()
 
 	d := &gostls.Dialer{
@@ -230,6 +232,7 @@ func TestDialer_DialContext_NilNetDialer(t *testing.T) {
 	initTestFixtures(t)
 
 	ln := startStdlibTLSServer(t)
+
 	defer func() { _ = ln.Close() }()
 
 	pool := rootCAsForTest(t)

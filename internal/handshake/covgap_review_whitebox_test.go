@@ -307,8 +307,10 @@ func TestRecvServerHello_NonEmptySNIEcho_Rejected(t *testing.T) {
 
 // typeNewSessionTicket is handshake type 4 (RFC 5077). The gostls client never
 // offers session tickets and has no Type constant for it, so it must be
-// rejected wherever it appears.
-const typeNewSessionTicket Type = 4
+// rejected wherever it appears. Kept as an untyped constant (not a Type) so it
+// does not extend the Type enum and trip the exhaustive linter on the package's
+// switches over Type.
+const typeNewSessionTicket = 4
 
 // TestRecvServerFlight_NewSessionTicket_Rejected verifies that a NewSessionTicket
 // injected into the server flight is rejected (never silently consumed).
