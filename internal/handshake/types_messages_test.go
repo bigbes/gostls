@@ -99,6 +99,69 @@ func TestParseMessage_ServerHelloDone_EmptyBody(t *testing.T) {
 	}
 }
 
+// TestParseMessage_HelloRequest_IsDistinctType verifies a HelloRequest decodes
+// to its own *HelloRequest type, not aliased onto *ServerHelloDone (which was a
+// type-confusion footgun for direct callers).
+func TestParseMessage_HelloRequest_IsDistinctType(t *testing.T) {
+	t.Parallel()
+
+	wire := handshake.MarshalMessage(&handshake.RawMessage{
+		MsgType: handshake.TypeHelloRequest,
+		Body:    nil,
+	})
+
+	msg, _, err := handshake.ParseMessage(wire)
+	if err != nil {
+		t.Fatalf("ParseMessage(HelloRequest): %v", err)
+	}
+
+	if _, ok := msg.(*handshake.HelloRequest); !ok {
+		t.Fatalf("expected *HelloRequest, got %T", msg)
+	}
+
+	if msg.Type() != handshake.TypeHelloRequest {
+		t.Fatalf("Type() = %d, want TypeHelloRequest", msg.Type())
+	}
+}
+
+// TestParseMessage_HelloRequest_NonEmptyBody verifies a HelloRequest with a
+// non-empty body is rejected (RFC 5246 §7.4.1.1: it carries no body).
+func TestParseMessage_HelloRequest_NonEmptyBody(t *testing.T) {
+	t.Parallel()
+
+	wire := handshake.MarshalMessage(&handshake.RawMessage{
+		MsgType: handshake.TypeHelloRequest,
+		Body:    []byte{0x01},
+	})
+
+	if _, _, err := handshake.ParseMessage(wire); err == nil {
+		t.Fatal("HelloRequest with non-empty body: expected error, got nil")
+	}
+}
+
+// TestParseMessage_CertificateRequest_TrailingBytes verifies the strict parser
+// rejects bytes after the certificate_authorities list.
+func TestParseMessage_CertificateRequest_TrailingBytes(t *testing.T) {
+	t.Parallel()
+
+	// certificate_types = {01}, sig_algs = {} (len 0), CAs = {} (len 0), then a
+	// trailing garbage byte.
+	body := []byte{
+		0x01, 0x01, // cert_types: len=1, [rsa_sign].
+		0x00, 0x00, // supported_signature_algorithms: len=0.
+		0x00, 0x00, // certificate_authorities: len=0.
+		0xFF, // trailing garbage.
+	}
+	wire := handshake.MarshalMessage(&handshake.RawMessage{
+		MsgType: handshake.TypeCertificateRequest,
+		Body:    body,
+	})
+
+	if _, _, err := handshake.ParseMessage(wire); err == nil {
+		t.Fatal("CertificateRequest with trailing bytes: expected error, got nil")
+	}
+}
+
 // -----------------------------------------------------------------------
 // messages.go: parseFinished — invalid verify_data length
 // -----------------------------------------------------------------------.

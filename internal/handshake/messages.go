@@ -290,6 +290,12 @@ func parseServerHello(b []byte) (*ServerHello, error) {
 			return nil, err
 		}
 
+		// The ServerHello server_name extension_data MUST be empty (RFC 6066 §3):
+		// a non-empty host_name echo is a protocol violation.
+		if ext.ServerName != "" {
+			return nil, errServerHelloNonEmptySNI
+		}
+
 		m.ExtendedMasterSecret = ext.ExtendedMasterSecret
 		m.RenegotiationInfo = ext.RenegotiationInfo
 		m.ExtensionTypes = seen
@@ -381,6 +387,24 @@ func parseServerKeyExchange(b []byte) *ServerKeyExchange {
 	return &ServerKeyExchange{Body: append([]byte(nil), b...)}
 }
 
+// HelloRequest is the TLS 1.2 HelloRequest message (RFC 5246 §7.4.1.1). It has
+// a zero-length body. A conforming client never accepts it mid-handshake (the
+// state machine rejects it); it is modeled as its own type so ParseMessage does
+// not alias it onto ServerHelloDone, which would be a type-confusion footgun for
+// any direct caller.
+type HelloRequest struct{}
+
+func (m *HelloRequest) Type() Type      { return TypeHelloRequest }
+func (m *HelloRequest) Marshal() []byte { return nil }
+
+func parseHelloRequest(b []byte) (*HelloRequest, error) {
+	if len(b) != 0 {
+		return nil, fmt.Errorf("%w, got %d bytes", errHelloRequestNonEmptyBody, len(b))
+	}
+
+	return &HelloRequest{}, nil
+}
+
 // ServerHelloDone is the TLS 1.2 ServerHelloDone message (RFC 5246 §7.4.5).
 // It has a zero-length body.
 type ServerHelloDone struct{}
@@ -449,9 +473,16 @@ func parseCertificateRequest(b []byte) (*CertificateRequest, error) {
 	b = rest
 
 	// certificate_authorities: uint16 byte-length prefix + list of {uint16 len, DER}.
-	casBytes, _, err := readLenPrefixed16(b)
+	casBytes, tail, err := readLenPrefixed16(b)
 	if err != nil {
 		return nil, fmt.Errorf("handshake: CertificateRequest certificate_authorities: %w", err)
+	}
+
+	// Reject trailing bytes after certificate_authorities, matching the strict
+	// parsing of the other handshake messages (no silent acceptance of garbage).
+	if len(tail) != 0 {
+		return nil, fmt.Errorf("%w: %d trailing bytes after CertificateRequest",
+			errTrailingHandshakeBytes, len(tail))
 	}
 
 	for len(casBytes) > 0 {

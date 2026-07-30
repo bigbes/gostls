@@ -1,3 +1,5 @@
+//go:build !openssl_gost_engine
+
 package suites
 
 // IsGOSTBuild reports whether the pure-Go clean-room GOST suites are registered.

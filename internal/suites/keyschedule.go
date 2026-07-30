@@ -53,6 +53,26 @@ type KeyMaterial struct {
 	ServerIV     []byte // implicit IV for server→client records.
 }
 
+// keyBlockIVLen returns the number of implicit-IV bytes a suite draws from the
+// key block. TLS 1.2 CBC (MAC-then-encrypt) suites use a fresh per-record
+// explicit IV and take NO IV from the key block (RFC 5246 §6.2.3.2), even though
+// their CipherSpec.FixedIVLen equals the block size. AEAD suites (GCM salt,
+// ChaCha20 write_IV) and the GOST stream/CTR suites (RFC 9189/9367) do carry an
+// implicit IV in the key block. This mirrors the production key-expansion path
+// in internal/handshake; deriving 16-byte CBC IVs here (the old behavior) is a
+// TLS 1.0 artifact and wrong for TLS 1.2.
+func keyBlockIVLen(suite *Suite) int {
+	isCBC := !suite.Cipher.AEAD &&
+		suite.Cipher.Name != "GOST28147-CNT" &&
+		suite.Cipher.Name != "KUZNYECHIK-CTR-OMAC" &&
+		suite.Cipher.Name != "MAGMA-CTR-OMAC"
+	if isCBC {
+		return 0
+	}
+
+	return suite.Cipher.FixedIVLen
+}
+
 // KeyExpansion derives the key material per RFC 5246 §6.3:
 //
 //	key_block = PRF(master_secret, "key expansion",
@@ -81,7 +101,7 @@ func KeyExpansion(suite *Suite, masterSecret, clientRandom, serverRandom []byte)
 
 	macKeyLen := suite.MAC.KeyLen
 	encKeyLen := suite.Cipher.KeyLen
-	ivLen := suite.Cipher.FixedIVLen
+	ivLen := keyBlockIVLen(suite)
 
 	totalLen := keyExpansionFactor*macKeyLen + keyExpansionFactor*encKeyLen + keyExpansionFactor*ivLen
 	if totalLen == 0 {

@@ -37,6 +37,10 @@ func dumpPlaintext(dir string, seq uint64, contentType uint8, version uint16, pa
 	defer wireDebugMu.Unlock()
 
 	if wireDebugFile == nil && !wireDebugOpenFail {
+		// The 0600 mode applies only when the file is created; if the operator
+		// points TLS_DEBUG_WIRE_LOG at a pre-existing world-readable file or a
+		// symlink, its permissions are not tightened. This is an opt-in debug
+		// tool, so that is left to the operator.
 		f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, wireDebugFilePerm)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "TLS_DEBUG_WIRE_LOG: open %q failed: %v\n", path, err)

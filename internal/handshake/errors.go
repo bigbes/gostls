@@ -25,6 +25,10 @@ var (
 	errExtHeaderTruncated = errors.New("handshake: truncated extension header (need 4 bytes)")
 	errExtBodyTruncated   = errors.New("handshake: extension body truncated")
 	errExtUnknown         = errors.New("handshake: unknown extension")
+	errDuplicateExtension = errors.New("handshake: duplicate extension type")
+	// errServerHelloNonEmptySNI reports a ServerHello whose server_name echo is
+	// non-empty (RFC 6066 §3 requires it to be empty).
+	errServerHelloNonEmptySNI = errors.New("handshake: ServerHello server_name extension must be empty")
 
 	errSNITruncatedListLen    = errors.New("handshake: server_name: truncated list length")
 	errSNIListLenExceeds      = errors.New("handshake: server_name: list length exceeds available bytes")
@@ -53,18 +57,22 @@ var (
 	errRINonEmpty = errors.New(
 		"handshake: renegotiation_info: non-empty renegotiated_connection; renegotiation is not supported",
 	)
+	errRITrailingBytes = errors.New(
+		"handshake: renegotiation_info: trailing bytes after renegotiated_connection",
+	)
 )
 
 // Message parsing.
 var (
-	errCHSessionIDTooLong = errors.New("handshake: ClientHello session_id length exceeds 32")
-	errCHCSOddByteCount   = errors.New("handshake: ClientHello cipher_suites has odd byte count")
-	errCHCSAtLeastOne     = errors.New("handshake: ClientHello cipher_suites must have at least one suite")
-	errCHCMAtLeastOne     = errors.New("handshake: ClientHello compression_methods must have at least one method")
-	errSHSessionIDTooLong = errors.New("handshake: ServerHello session_id length exceeds 32")
-	errCertEntryZeroLen   = errors.New("handshake: Certificate entry has zero length")
-	errSHDNonEmptyBody    = errors.New("handshake: ServerHelloDone body must be empty")
-	errCRSAOddByteCount   = errors.New(
+	errCHSessionIDTooLong       = errors.New("handshake: ClientHello session_id length exceeds 32")
+	errCHCSOddByteCount         = errors.New("handshake: ClientHello cipher_suites has odd byte count")
+	errCHCSAtLeastOne           = errors.New("handshake: ClientHello cipher_suites must have at least one suite")
+	errCHCMAtLeastOne           = errors.New("handshake: ClientHello compression_methods must have at least one method")
+	errSHSessionIDTooLong       = errors.New("handshake: ServerHello session_id length exceeds 32")
+	errCertEntryZeroLen         = errors.New("handshake: Certificate entry has zero length")
+	errSHDNonEmptyBody          = errors.New("handshake: ServerHelloDone body must be empty")
+	errHelloRequestNonEmptyBody = errors.New("handshake: HelloRequest body must be empty")
+	errCRSAOddByteCount         = errors.New(
 		"handshake: CertificateRequest supported_signature_algorithms has odd byte count",
 	)
 	errFinishedVerifyLen = errors.New("handshake: Finished: verify_data length must be 12 or 32")
@@ -72,6 +80,9 @@ var (
 	errCHTrailingData   = errors.New("handshake: ClientHello: trailing bytes after extensions")
 	errSHTrailingData   = errors.New("handshake: ServerHello: trailing bytes after extensions")
 	errCertTrailingData = errors.New("handshake: Certificate: trailing bytes after certificate_list")
+	// errTrailingHandshakeBytes reports unexpected bytes after a fully-parsed
+	// handshake message body (e.g. CertificateRequest).
+	errTrailingHandshakeBytes = errors.New("handshake: trailing bytes after message body")
 )
 
 // TLS client state machine errors.
@@ -103,6 +114,9 @@ var (
 	errDHESigSectionShort    = errors.New("tls: DHE ServerKeyExchange: signature section too short")
 	errDHESigTruncated       = errors.New("tls: DHE ServerKeyExchange: signature truncated")
 	errSKEUnadvertisedSigAlg = errors.New("tls: ServerKeyExchange signature algorithm not offered by client")
+	errSKESigAuthMismatch    = errors.New(
+		"tls: ServerKeyExchange signature algorithm does not match the suite's authentication kind",
+	)
 	errU16PrefixTruncated    = errors.New("truncated: need 2 bytes for length prefix")
 	errU16BodyTruncated      = errors.New("truncated: body too short")
 	errCertNotRSA            = errors.New("cert public key is not RSA")

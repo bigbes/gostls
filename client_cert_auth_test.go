@@ -296,6 +296,7 @@ func TestClient_Handshake_WithCertAuth_RSACert(t *testing.T) {
 	}
 
 	clientConn, serverConn := net.Pipe()
+
 	defer func() { _ = clientConn.Close() }()
 	defer func() { _ = serverConn.Close() }()
 
@@ -350,6 +351,7 @@ func TestClient_Handshake_WithCertAuth_NoCert(t *testing.T) {
 	}
 
 	clientConn, serverConn := net.Pipe()
+
 	defer func() { _ = clientConn.Close() }()
 	defer func() { _ = serverConn.Close() }()
 
@@ -404,6 +406,7 @@ func TestClient_Handshake_NoCertReq_CertConfigured(t *testing.T) {
 	}
 
 	clientConn, serverConn := net.Pipe()
+
 	defer func() { _ = clientConn.Close() }()
 	defer func() { _ = serverConn.Close() }()
 
@@ -459,6 +462,7 @@ func TestClient_Handshake_WithCertAuth_VerifiesSignature(t *testing.T) {
 	}
 
 	clientConn, serverConn := net.Pipe()
+
 	defer func() { _ = clientConn.Close() }()
 	defer func() { _ = serverConn.Close() }()
 
@@ -535,6 +539,7 @@ func TestClient_Config_ClientCerts_InvalidKeyType(t *testing.T) {
 
 	// Connect to a dummy server that will never be reached.
 	clientConn, serverConn := net.Pipe()
+
 	defer func() { _ = clientConn.Close() }()
 	defer func() { _ = serverConn.Close() }()
 
@@ -577,6 +582,7 @@ func TestClient_Config_ClientCerts_EmptyRawCertificate(t *testing.T) {
 	}
 
 	clientConn, serverConn := net.Pipe()
+
 	defer func() { _ = clientConn.Close() }()
 	defer func() { _ = serverConn.Close() }()
 
@@ -643,6 +649,7 @@ func TestClient_Config_ClientCerts_EmptyRawCertificate_WithParsedCertificate(t *
 	}
 
 	clientConn, serverConn := net.Pipe()
+
 	defer func() { _ = clientConn.Close() }()
 	defer func() { _ = serverConn.Close() }()
 

@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"math/big"
 	"testing"
 	"time"
@@ -281,7 +282,7 @@ func TestRecvServerFlight_SKE_CertReq_SHD(t *testing.T) {
 	wire = append(wire, certReqRec...)
 	wire = append(wire, shdRec...)
 
-	suite := mustLookupSuite(t, "ECDHE-RSA-AES128-SHA256")
+	suite := mustLookupSuite(t, "ECDHE-ECDSA-AES128-SHA256")
 	c := makeClientStateForFlight(t, wire, suite)
 
 	c.clientRandom = clientRandom
@@ -306,6 +307,43 @@ func TestRecvServerFlight_SKE_CertReq_SHD(t *testing.T) {
 
 	if c.certReq.CertificateTypes[0] != 0x01 || c.certReq.CertificateTypes[1] != 0x02 {
 		t.Errorf("CertificateTypes values wrong: %v", c.certReq.CertificateTypes)
+	}
+}
+
+// TestRecvServerFlight_SKE_SigAuthMismatch verifies the algorithm-confusion
+// guard: an ECDSA-signed ServerKeyExchange under an ECDHE-RSA suite (whose auth
+// kind is RSA) is rejected, even though the ECDSA signature itself is valid and
+// the cert chain would verify. RFC 5246 §7.4.3 / RFC 4492 §5.4 bind the SKE
+// signature algorithm to the suite's authentication kind.
+func TestRecvServerFlight_SKE_SigAuthMismatch(t *testing.T) {
+	t.Parallel()
+
+	priv, cert := newTestECDSACert(t)
+
+	var clientRandom, serverRandom [32]byte
+
+	for i := range clientRandom {
+		clientRandom[i] = byte(i)
+		serverRandom[i] = byte(i + 32)
+	}
+
+	// ECDSA-signed SKE (sigAlg byte 0x03) ...
+	skeBody := buildECDHESKEBody(t, priv, clientRandom, serverRandom)
+	skeRec := buildHSRecord(TypeServerKeyExchange, skeBody)
+	shdRec := buildHSRecord(TypeServerHelloDone, nil)
+
+	wire := append(append([]byte{}, skeRec...), shdRec...)
+
+	// ... but negotiated under an ECDHE-RSA (AuthRSA) suite — a mismatch.
+	suite := mustLookupSuite(t, "ECDHE-RSA-AES128-SHA256")
+	c := makeClientStateForFlight(t, wire, suite)
+
+	c.clientRandom = clientRandom
+	c.serverRandom = serverRandom
+
+	_, err := c.recvServerFlight(cert)
+	if !errors.Is(err, errSKESigAuthMismatch) {
+		t.Fatalf("expected errSKESigAuthMismatch, got %v", err)
 	}
 }
 
@@ -373,7 +411,7 @@ func TestRecvServerFlight_SKE_SHD_NoCertReq(t *testing.T) {
 	wire = append(wire, skeRec...)
 	wire = append(wire, shdRec...)
 
-	suite := mustLookupSuite(t, "ECDHE-RSA-AES128-SHA256")
+	suite := mustLookupSuite(t, "ECDHE-ECDSA-AES128-SHA256")
 	c := makeClientStateForFlight(t, wire, suite)
 
 	c.clientRandom = clientRandom

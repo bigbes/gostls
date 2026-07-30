@@ -12,6 +12,38 @@ import (
 
 // ---- registry tests ---------------------------------------------------------.
 
+// TestSuites_All_DeterministicOrder verifies that All() returns a stable order
+// across calls. Ranging over the registry map (the previous implementation)
+// randomized the order per call, which silently discarded the client's
+// preference expression in the default ClientHello and made the wire output
+// non-reproducible.
+func TestSuites_All_DeterministicOrder(t *testing.T) {
+	t.Parallel()
+
+	first := suites.All()
+
+	for iter := range 50 {
+		got := suites.All()
+		if len(got) != len(first) {
+			t.Fatalf("iter %d: length changed: got %d, want %d", iter, len(got), len(first))
+		}
+
+		for i := range got {
+			if got[i].ID != first[i].ID {
+				t.Fatalf("iter %d: order changed at index %d: got 0x%04x, want 0x%04x",
+					iter, i, got[i].ID, first[i].ID)
+			}
+		}
+	}
+
+	// The returned slice must be a copy: mutating it must not affect later calls.
+	first[0] = nil
+
+	if suites.All()[0] == nil {
+		t.Fatal("All() returned a slice aliasing internal state; mutation leaked")
+	}
+}
+
 // TestSuites_AllIDsUnique verifies that no two registered suites share an IANA ID.
 func TestSuites_AllIDsUnique(t *testing.T) {
 	t.Parallel()
@@ -400,8 +432,8 @@ func TestKeySchedule_MasterSecret_BadRandom(t *testing.T) {
 }
 
 // TestKeySchedule_KeyExpansion verifies RFC 5246 §6.3 key expansion for
-// AES-128-CBC-SHA256: mac_key_len=32, enc_key_len=16, fixed_iv_len=16.
-// Total key block = 2*32 + 2*16 + 2*16 = 128 bytes.
+// AES-128-CBC-SHA256: mac_key_len=32, enc_key_len=16. CBC suites take no IV from
+// the key block in TLS 1.2, so the key block = 2*32 + 2*16 = 96 bytes.
 //
 // Vectors derived via Python (same prf function):
 //
@@ -447,15 +479,15 @@ func TestKeySchedule_KeyExpansion(t *testing.T) {
 		t.Errorf("ServerEncKey: want 16 bytes, got %d", len(km.ServerEncKey))
 	}
 
-	if len(km.ClientIV) != 16 {
-		t.Errorf(
-			"ClientIV: want 16 bytes, got %d (FixedIVLen from suite is %d)",
-			len(km.ClientIV), suite.Cipher.FixedIVLen,
-		)
+	// TLS 1.2 CBC suites take NO IV from the key block (fresh per-record explicit
+	// IV, RFC 5246 §6.2.3.2), so KeyExpansion must not carve IV bytes here even
+	// though the suite's FixedIVLen is the 16-byte block size.
+	if len(km.ClientIV) != 0 {
+		t.Errorf("ClientIV: want 0 bytes for a CBC suite, got %d", len(km.ClientIV))
 	}
 
-	if len(km.ServerIV) != 16 {
-		t.Errorf("ServerIV: want 16 bytes, got %d", len(km.ServerIV))
+	if len(km.ServerIV) != 0 {
+		t.Errorf("ServerIV: want 0 bytes for a CBC suite, got %d", len(km.ServerIV))
 	}
 
 	// Verify specific key values derived via Python.
@@ -465,8 +497,6 @@ func TestKeySchedule_KeyExpansion(t *testing.T) {
 	wantServerMAC := mustHex("957b91f119fec17c34a2c28c47420adc26b1ec7d9e8cb9c3f54e3977ffb3ef3e")
 	wantClientEnc := mustHex("f3b742a63e5fc30407934d0ff858f22f")
 	wantServerEnc := mustHex("a224ad1b8bfbfb50d6a3c33a878a1e68")
-	wantClientIV := mustHex("c839eaa73fb4fc38ad62cb0b9570b195")
-	wantServerIV := mustHex("f94e52458d6194c625741ba6fbe79b24")
 
 	if hex.EncodeToString(km.ClientMACKey) != hex.EncodeToString(wantClientMAC) {
 		t.Errorf("ClientMACKey\n got: %x\nwant: %x", km.ClientMACKey, wantClientMAC)
@@ -482,14 +512,6 @@ func TestKeySchedule_KeyExpansion(t *testing.T) {
 
 	if hex.EncodeToString(km.ServerEncKey) != hex.EncodeToString(wantServerEnc) {
 		t.Errorf("ServerEncKey\n got: %x\nwant: %x", km.ServerEncKey, wantServerEnc)
-	}
-
-	if hex.EncodeToString(km.ClientIV) != hex.EncodeToString(wantClientIV) {
-		t.Errorf("ClientIV\n got: %x\nwant: %x", km.ClientIV, wantClientIV)
-	}
-
-	if hex.EncodeToString(km.ServerIV) != hex.EncodeToString(wantServerIV) {
-		t.Errorf("ServerIV\n got: %x\nwant: %x", km.ServerIV, wantServerIV)
 	}
 }
 

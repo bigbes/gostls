@@ -1,3 +1,5 @@
+//go:build !openssl_gost_engine
+
 // Package suites — GOST cipher suite registrations (pure-Go clean-room backend).
 // Compiled in every build EXCEPT -tags openssl_gost_engine, where the OpenSSL
 // gost-engine placeholder registrations in gost_suites_openssl_engine.go own
@@ -117,11 +119,13 @@ func gost28147IMITHashNew() hash.Hash {
 //
 // Suite 0xC100: GOST2012-KUZNYECHIK-KUZNYECHIKOMAC
 // Kuznyechik (GOST R 34.12-2015, 128-bit block) in CTR mode + OMAC-16.
-// RFC 9189 §4.3 / RFC 9367: KeyLen=32, IV=16 bytes (from key block, no wire IV).
+// RFC 9189 §4.3 / RFC 9367: KeyLen=32, IV=8 bytes (kuznyechikIVLen, from key
+// block, no wire IV).
 //
 // Suite 0xC101: GOST2012-MAGMA-MAGMAOMAC
 // Magma (GOST R 34.12-2015, 64-bit block) in CTR mode + OMAC-8.
-// RFC 9189 §4.4 / RFC 9367: KeyLen=32, IV=8 bytes (from key block, no wire IV).
+// RFC 9189 §4.4 / RFC 9367: KeyLen=32, IV=4 bytes (magmaIVLen, from key block,
+// no wire IV).
 
 // specKuznyechikCTROMAC describes the Kuznyechik CTR cipher for RFC 9367.
 //

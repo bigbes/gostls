@@ -85,6 +85,14 @@ var registry = map[uint16]*Suite{}
 // nameIndex provides fast lookup by OpenSSL name.
 var nameIndex = map[string]*Suite{}
 
+// registryOrder preserves suite registration order so All() (and, transitively,
+// the default ClientHello offer list) is deterministic. Ranging over registry —
+// a Go map — would randomize the offered-suite order on every handshake, which
+// silently discards the client's preference expression (list order) and makes
+// the ClientHello non-reproducible. Registration order in registry.go is the
+// intended preference, so we return that verbatim.
+var registryOrder []*Suite
+
 // register adds a suite to the registry. It panics on duplicate ID or name.
 func register(s *Suite) {
 	if _, dup := registry[s.ID]; dup {
@@ -97,6 +105,7 @@ func register(s *Suite) {
 
 	registry[s.ID] = s
 	nameIndex[s.Name] = s
+	registryOrder = append(registryOrder, s)
 }
 
 // Lookup returns the Suite with the given IANA ID, or (nil, false) if not registered.
@@ -111,12 +120,12 @@ func LookupByName(name string) (*Suite, bool) {
 	return s, ok
 }
 
-// All returns all registered suites in an unspecified but stable order.
+// All returns all registered suites in registration order (registry.go), which
+// is deterministic and stable across calls and processes. The returned slice is
+// a fresh copy; the caller may reorder or filter it freely.
 func All() []*Suite {
-	out := make([]*Suite, 0, len(registry))
-	for _, s := range registry {
-		out = append(out, s)
-	}
+	out := make([]*Suite, len(registryOrder))
+	copy(out, registryOrder)
 
 	return out
 }

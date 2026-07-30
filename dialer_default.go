@@ -58,6 +58,7 @@ func (c *Conn) handshakeContext(ctx context.Context) error {
 
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = c.conn.SetDeadline(deadline)
+
 		defer func() { _ = c.conn.SetDeadline(time.Time{}) }()
 	}
 

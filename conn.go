@@ -29,10 +29,18 @@ var (
 	// errNoServerName is returned when verification is enabled but no ServerName
 	// is set and none could be derived from the dial address.
 	errNoServerName = errors.New("tls: no ServerName and InsecureSkipVerify is false; cannot verify server identity")
+	// errTooManyEmptyRecords is returned when a peer sends too many consecutive
+	// zero-length application_data records.
+	errTooManyEmptyRecords = errors.New("tls: too many consecutive empty records")
 )
 
 // alertMinLen is the minimum length of a TLS alert record (level + description).
 const alertMinLen = 2
+
+// maxEmptyRecords bounds consecutive zero-length application_data records a peer
+// may send before a Read gives up, preventing an empty-record flood from pinning
+// the reader goroutine (crypto/tls uses the same defense).
+const maxEmptyRecords = 32
 
 // Compile-time interface check.
 var _ net.Conn = (*Conn)(nil)
@@ -147,7 +155,12 @@ func (c *Conn) Read(b []byte) (int, error) {
 		return 0, c.readErr
 	}
 
-	// Read records until we get application data.
+	// Read records until we get application data. emptyRecords bounds the number
+	// of consecutive zero-length application_data records so a peer cannot pin
+	// this goroutine by streaming empty records forever (mirrors crypto/tls's
+	// maxUselessRecords guard).
+	emptyRecords := 0
+
 	for {
 		ct, payload, err := c.layer.ReadRecord()
 		if err != nil {
@@ -159,6 +172,13 @@ func (c *Conn) Read(b []byte) (int, error) {
 		switch ct {
 		case record.ContentTypeApplicationData:
 			if len(payload) == 0 {
+				emptyRecords++
+				if emptyRecords > maxEmptyRecords {
+					c.readErr = errTooManyEmptyRecords
+
+					return 0, c.readErr
+				}
+
 				continue
 			}
 
@@ -235,11 +255,25 @@ func (c *Conn) Write(b []byte) (int, error) {
 	return written, nil
 }
 
+// closeNotifyTimeout bounds the best-effort close_notify write so Close cannot
+// block indefinitely on a peer that has stopped reading (full send buffer).
+// Matches crypto/tls's 5-second close-notify deadline.
+const closeNotifyTimeout = 5 * time.Second
+
 // Close sends a close_notify alert (when the handshake completed) and closes the
 // underlying connection. It never waits on an in-flight handshake: closing the
 // transport unblocks a handshake currently blocked on I/O, which then returns an
 // error. This is why the decision below uses the handshakeOK flag rather than
 // driving handshakeOnce (which would block).
+//
+// The close_notify write must never make Close hang. Two hazards are handled:
+//   - a concurrent Write may be blocked inside WriteRecord while holding outMu;
+//     acquiring outMu with a plain Lock would then deadlock Close forever. We
+//     TryLock instead and skip close_notify if a Write holds the mutex — closing
+//     the transport below unblocks that Write. This is what net.Conn requires
+//     ("Close unblocks any blocked Read or Write").
+//   - even with outMu free, the peer may have stopped reading; a bounded write
+//     deadline caps the close_notify write.
 func (c *Conn) Close() error {
 	if !c.closed.CompareAndSwap(false, true) {
 		return nil
@@ -249,8 +283,9 @@ func (c *Conn) Close() error {
 	// the transport is then still open and a send protector is installed.
 	// handshakeOK is false while a handshake is in flight — exactly when we must
 	// not block trying to write an alert.
-	if c.handshakeOK.Load() {
-		c.outMu.Lock()
+	if c.handshakeOK.Load() && c.outMu.TryLock() {
+		// Bound the alert write; discarded when c.conn.Close() runs below.
+		_ = c.conn.SetWriteDeadline(time.Now().Add(closeNotifyTimeout))
 
 		alertBody := record.EncodeAlert(record.AlertLevelWarning, record.AlertCloseNotify)
 		// Best effort: ignore write error since we're closing anyway.

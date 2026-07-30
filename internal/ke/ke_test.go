@@ -564,6 +564,29 @@ func TestDHE_Rejects_MalformedP_TooShort(t *testing.T) {
 	}
 }
 
+// TestDHE_Rejects_1024BitPrime verifies the 2048-bit Logjam floor: a 1024-bit
+// prime (an odd, otherwise well-formed value) is rejected as too short, closing
+// the CVE-2015-4000 precomputation exposure. Uses an odd 128-byte value so the
+// too-short check — not the even-p check — is what fires.
+func TestDHE_Rejects_1024BitPrime(t *testing.T) {
+	t.Parallel()
+
+	p1024 := make([]byte, 128) // 1024 bits.
+
+	p1024[0] = 0xFF
+	p1024[127] = 0xFF // odd.
+
+	g := []byte{0x02}
+	Ys := []byte{0x03}
+
+	params := buildDHEServerParams(p1024, g, Ys)
+	ex := ke.NewDHEExchange(nil)
+
+	if _, _, err := ex.ClientKeyExchange(params); err == nil {
+		t.Fatal("expected 1024-bit prime to be rejected by the 2048-bit floor, got nil")
+	}
+}
+
 // TestDHE_Rejects_MalformedP_Even verifies that an even p is rejected.
 func TestDHE_Rejects_MalformedP_Even(t *testing.T) {
 	t.Parallel()

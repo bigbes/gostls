@@ -105,8 +105,7 @@ func ParseMessage(data []byte) (Message, []byte, error) {
 
 	switch msgType {
 	case TypeHelloRequest:
-		// HelloRequest has an empty body; treat as a no-op message.
-		msg, err = &ServerHelloDone{}, nil
+		msg, err = parseHelloRequest(body)
 	case TypeClientHello:
 		msg, err = parseClientHello(body)
 	case TypeServerHello:

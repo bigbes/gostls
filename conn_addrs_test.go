@@ -97,6 +97,7 @@ func TestNewConn_NilConfig(t *testing.T) {
 	t.Parallel()
 
 	client, server := net.Pipe()
+
 	defer func() { _ = client.Close() }()
 	defer func() { _ = server.Close() }()
 
@@ -116,6 +117,7 @@ func TestConn_AddrDelegation(t *testing.T) {
 	t.Parallel()
 
 	client, server := net.Pipe()
+
 	defer func() { _ = client.Close() }()
 	defer func() { _ = server.Close() }()
 
@@ -136,6 +138,7 @@ func TestConn_SetDeadline(t *testing.T) {
 	t.Parallel()
 
 	client, server := net.Pipe()
+
 	defer func() { _ = client.Close() }()
 	defer func() { _ = server.Close() }()
 
